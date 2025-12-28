@@ -414,7 +414,15 @@ struct ColumnLayoutPreview: View {
                         column: column,
                         columnIndex: index,
                         isSelected: selectedColumn == index,
-                        containerSize: geometry.size
+                        containerSize: geometry.size,
+                        canRemove: windowManager.columns.count > 1,
+                        onRemove: {
+                            windowManager.removeColumn(at: index)
+                            // Adjust selection if needed
+                            if selectedColumn >= windowManager.columns.count {
+                                selectedColumn = max(0, windowManager.columns.count - 1)
+                            }
+                        }
                     )
                     .onTapGesture {
                         selectedColumn = index
@@ -425,6 +433,26 @@ struct ColumnLayoutPreview: View {
                         ColumnDividerHandle(dividerIndex: index)
                     }
                 }
+
+                // Add column button
+                Button {
+                    windowManager.addColumn()
+                    selectedColumn = windowManager.columns.count - 1
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44)
+                        .frame(maxHeight: .infinity)
+                        .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1, antialiased: true)
+                        )
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 8)
             }
             .padding()
         }
@@ -437,16 +465,31 @@ struct ColumnPreview: View {
     let columnIndex: Int
     let isSelected: Bool
     let containerSize: CGSize
+    let canRemove: Bool
+    let onRemove: () -> Void
     @EnvironmentObject var windowManager: WindowManager
 
     var body: some View {
         VStack(spacing: 0) {
-            // Column header
-            Text("Column \(columnIndex + 1)")
-                .font(.caption)
-                .fontWeight(.medium)
-                .foregroundStyle(isSelected ? .primary : .secondary)
-                .padding(.vertical, 4)
+            // Column header with remove button
+            HStack(spacing: 4) {
+                Text("Column \(columnIndex + 1)")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundStyle(isSelected ? .primary : .secondary)
+
+                if canRemove {
+                    Button {
+                        onRemove()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 4)
 
             // Windows in column
             if column.windows.isEmpty {

@@ -415,6 +415,40 @@ class WindowManager: ObservableObject {
         addWindow(window, toColumn: toColumn)
     }
 
+    /// Add a new empty column
+    func addColumn() {
+        // Recalculate proportions to make room for new column
+        let newCount = columns.count + 1
+        let newProportion = 1.0 / CGFloat(newCount)
+
+        for i in 0..<columns.count {
+            columns[i].widthProportion = newProportion
+        }
+
+        columns.append(Column(widthProportion: newProportion, windows: []))
+        normalizeColumnProportions()
+    }
+
+    /// Remove a column (and redistribute its width to remaining columns)
+    func removeColumn(at index: Int) {
+        guard index < columns.count, columns.count > 1 else { return }
+
+        // Move any windows back to available
+        for colWindow in columns[index].windows {
+            // Windows will be rediscovered on next refresh
+        }
+
+        columns.remove(at: index)
+
+        // Redistribute widths equally
+        let newProportion = 1.0 / CGFloat(columns.count)
+        for i in 0..<columns.count {
+            columns[i].widthProportion = newProportion
+        }
+
+        refreshAvailableWindows()
+    }
+
     // MARK: - Proportion Normalization
 
     /// Ensure all column width proportions sum to exactly 1.0
