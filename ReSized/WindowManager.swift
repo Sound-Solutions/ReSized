@@ -1540,7 +1540,7 @@ class WindowManager: ObservableObject {
     }
 
     private func applyLayoutAndUpdateExpected(for layout: MonitorLayout) {
-        applyLayout()
+        applyLayoutForMonitor(layout)
 
         // Store what we expect each window's frame to be
         layout.expectedFrames.removeAll()
