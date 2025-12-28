@@ -344,28 +344,38 @@ struct MonitorTabs: View {
     @State private var hoveredMonitorId: String?
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                ForEach(windowManager.availableMonitors) { monitor in
-                    MonitorTab(
-                        monitor: monitor,
-                        isSelected: windowManager.selectedMonitor?.id == monitor.id,
-                        hasLayout: windowManager.hasLayout(for: monitor),
-                        isManaging: windowManager.isManaging(monitor: monitor),
-                        isHovered: hoveredMonitorId == monitor.id
-                    ) {
-                        windowManager.selectMonitor(monitor)
-                    }
-                    .onHover { hovering in
-                        hoveredMonitorId = hovering ? monitor.id : nil
+        HStack {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(windowManager.availableMonitors) { monitor in
+                        MonitorTab(
+                            monitor: monitor,
+                            isSelected: windowManager.selectedMonitor?.id == monitor.id,
+                            hasLayout: windowManager.hasLayout(for: monitor),
+                            isManaging: windowManager.isManaging(monitor: monitor),
+                            isHovered: hoveredMonitorId == monitor.id
+                        ) {
+                            windowManager.selectMonitor(monitor)
+                        }
+                        .onHover { hovering in
+                            hoveredMonitorId = hovering ? monitor.id : nil
+                        }
                     }
                 }
+                .padding(.horizontal)
+                .padding(.vertical, 6)
             }
-            .padding(.horizontal)
-            .padding(.vertical, 6)
+
+            Spacer()
+
+            Text("ReSized")
+                .font(.headline)
+                .fontWeight(.bold)
+                .foregroundStyle(.secondary)
+                .padding(.trailing, 16)
         }
-        .padding(.top, 28) // Push below invisible title bar area
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .padding(.top, 6)
+        .background(Color(white: 0.08))
     }
 }
 

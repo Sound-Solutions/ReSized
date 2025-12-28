@@ -4,13 +4,22 @@ import AppKit
 @main
 struct ReSizedApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        WindowGroup {
+        Window("ReSized", id: "main") {
             ContentView()
                 .environmentObject(WindowManager.shared)
+                .onAppear {
+                    // Store openWindow action for use from AppDelegate
+                    AppDelegate.openWindowAction = { [openWindow] in
+                        openWindow(id: "main")
+                    }
+                }
         }
         .windowStyle(.hiddenTitleBar)
+        .defaultPosition(.center)
+        .defaultSize(width: 900, height: 600)
 
         Settings {
             SettingsView()
@@ -21,6 +30,9 @@ struct ReSizedApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var startStopMenuItem: NSMenuItem?
+
+    // Static closure to open window from SwiftUI
+    static var openWindowAction: (() -> Void)?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Check accessibility permissions on launch
@@ -85,10 +97,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showConfig() {
-        // Bring app to front and show window
         NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.first(where: { $0.title != "Item-0" && !$0.title.isEmpty }) ?? NSApp.windows.first {
+
+        // Try to find existing window first
+        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" || $0.title == "ReSized" }) {
             window.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        // If no window exists, use the stored openWindow action
+        if let openWindow = AppDelegate.openWindowAction {
+            openWindow()
         }
     }
 
