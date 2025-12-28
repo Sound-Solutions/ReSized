@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Carbon
 
 @main
 struct ReSizedApp: App {
@@ -30,9 +31,15 @@ struct ReSizedApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var startStopMenuItem: NSMenuItem?
+    private var hotKeyRefs: [UInt32: EventHotKeyRef] = [:]
 
     // Static closure to open window from SwiftUI
     static var openWindowAction: (() -> Void)?
+
+    // Hotkey ID scheme:
+    // ID 1 = Cmd+Shift+R (toggle start/stop)
+    // ID 10-18 = Cmd+Shift+1-9 (per-monitor presets)
+    // ID 20-28 = Cmd+Option+Shift+1-9 (workspace presets)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Check accessibility permissions on launch
@@ -41,6 +48,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         setupMenuBar()
+        registerAllHotKeys()
 
         // Observe WindowManager's isActive changes to update menu
         NotificationCenter.default.addObserver(
@@ -49,6 +57,121 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSNotification.Name("WindowManagerActiveChanged"),
             object: nil
         )
+    }
+
+    private func registerAllHotKeys() {
+        // Install single event handler for all hotkeys
+        var eventSpec = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+
+        InstallEventHandler(
+            GetApplicationEventTarget(),
+            { (_, event, _) -> OSStatus in
+                // Extract the hotkey ID from the event
+                var hotKeyID = EventHotKeyID()
+                let status = GetEventParameter(
+                    event,
+                    EventParamName(kEventParamDirectObject),
+                    EventParamType(typeEventHotKeyID),
+                    nil,
+                    MemoryLayout<EventHotKeyID>.size,
+                    nil,
+                    &hotKeyID
+                )
+
+                guard status == noErr else { return status }
+
+                DispatchQueue.main.async {
+                    AppDelegate.handleHotKey(id: hotKeyID.id)
+                }
+                return noErr
+            },
+            1,
+            &eventSpec,
+            nil,
+            nil
+        )
+
+        let signature = OSType(0x52535A44) // "RSZD"
+
+        // Register Cmd+Shift+R (toggle) - ID 1
+        registerSingleHotKey(keyCode: 15, modifiers: cmdKey | shiftKey, id: 1, signature: signature)
+
+        // Key codes for 1-9: 18, 19, 20, 21, 23, 22, 26, 28, 25
+        let numberKeyCodes: [UInt32] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
+
+        // Register Cmd+Shift+1-9 (per-monitor presets) - IDs 10-18
+        for (index, keyCode) in numberKeyCodes.enumerated() {
+            registerSingleHotKey(
+                keyCode: keyCode,
+                modifiers: cmdKey | shiftKey,
+                id: UInt32(10 + index),
+                signature: signature
+            )
+        }
+
+        // Register Cmd+Option+Shift+1-9 (workspace presets) - IDs 20-28
+        for (index, keyCode) in numberKeyCodes.enumerated() {
+            registerSingleHotKey(
+                keyCode: keyCode,
+                modifiers: cmdKey | optionKey | shiftKey,
+                id: UInt32(20 + index),
+                signature: signature
+            )
+        }
+
+        print("Registered 19 global hotkeys")
+    }
+
+    private func registerSingleHotKey(keyCode: UInt32, modifiers: Int, id: UInt32, signature: OSType) {
+        var hotKeyID = EventHotKeyID()
+        hotKeyID.signature = signature
+        hotKeyID.id = id
+
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(
+            keyCode,
+            UInt32(modifiers),
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &ref
+        )
+
+        if status == noErr, let ref = ref {
+            hotKeyRefs[id] = ref
+        } else {
+            print("Failed to register hotkey ID \(id): \(status)")
+        }
+    }
+
+    private static func handleHotKey(id: UInt32) {
+        let wm = WindowManager.shared
+
+        switch id {
+        case 1:
+            // Toggle start/stop
+            if wm.hasAnyActiveLayout {
+                wm.stopAllLayouts()
+            } else {
+                wm.startAllLayouts()
+            }
+
+        case 10...18:
+            // Per-monitor preset (Cmd+Shift+1-9)
+            let slot = Int(id) - 9  // Convert ID 10-18 to slot 1-9
+            wm.handleMonitorPreset(slot: slot)
+
+        case 20...28:
+            // Workspace preset (Cmd+Option+Shift+1-9)
+            let slot = Int(id) - 19  // Convert ID 20-28 to slot 1-9
+            wm.handleWorkspacePreset(slot: slot)
+
+        default:
+            break
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

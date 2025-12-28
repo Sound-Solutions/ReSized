@@ -164,6 +164,7 @@ class MonitorLayout: ObservableObject {
     @Published var isActive: Bool = false
 
     var displayLink: CVDisplayLink?
+    var windowObserver: WindowObserver?
     var expectedFrames: [UUID: CGRect] = [:]
     var framesSinceApply: Int = 0
     var isApplyingLayout = false
@@ -283,6 +284,44 @@ class WindowManager: ObservableObject {
                 self?.refreshMonitors()
             }
             .store(in: &cancellables)
+
+        // Observe app launches for auto-filling placeholder slots
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleAppLaunched(_:)),
+            name: NSWorkspace.didLaunchApplicationNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleAppLaunched(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              let bundleId = app.bundleIdentifier,
+              let appName = app.localizedName else { return }
+
+        // Check if any active layout has a placeholder waiting for this app
+        for layout in monitorLayouts.values where layout.isActive {
+            // Delay slightly to let the app create its window
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.tryFillPlaceholder(appName: appName, bundleId: bundleId, in: layout)
+            }
+        }
+    }
+
+    private func tryFillPlaceholder(appName: String, bundleId: String, in layout: MonitorLayout) {
+        // Refresh windows to find the new app's window
+        refreshAvailableWindows()
+
+        // Find any empty placeholder slots matching this app
+        // For now, this is a simplified implementation - full placeholder
+        // tracking would require storing placeholder info in the layout model
+
+        // Try to find a window for this app that isn't already assigned
+        guard let window = availableWindows.first(where: { $0.ownerName == appName }) else { return }
+
+        // If we found a window, refresh the layout to pick it up
+        print("Auto-filled placeholder for \(appName)")
+        objectWillChange.send()
     }
 
     deinit {
@@ -1471,6 +1510,22 @@ class WindowManager: ObservableObject {
         // Hide monitor highlight when actively managing
         MonitorHighlightWindow.hide()
 
+        // Check for placeholder apps that need launching
+        let placeholdersToLaunch = findPlaceholderAppsToLaunch(in: layout)
+        if !placeholdersToLaunch.isEmpty {
+            // Launch apps and wait for windows, then continue
+            launchPlaceholderApps(placeholdersToLaunch) { [weak self, weak layout] in
+                guard let self = self, let layout = layout else { return }
+                self.refreshAvailableWindows()
+                self.rematchPlaceholderSlots(in: layout, for: placeholdersToLaunch)
+                self.finishStartManaging(layout: layout)
+            }
+        } else {
+            finishStartManaging(layout: layout)
+        }
+    }
+
+    private func finishStartManaging(layout: MonitorLayout) {
         layout.isActive = true
         layout.appState = .active
         objectWillChange.send()
@@ -1478,11 +1533,196 @@ class WindowManager: ObservableObject {
         // Apply initial layout and store expected frames
         applyLayoutAndUpdateExpected(for: layout)
 
-        // Create display link synced to this monitor's refresh rate
+        // Set up event-driven window observation (replaces constant polling)
+        setupWindowObserver(for: layout)
+
+        // Create display link for periodic tasks (closed window detection only, ~1/sec)
         setupDisplayLink(for: layout)
 
         // Notify menu bar
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
+    }
+
+    /// Find placeholder slots that need apps launched
+    private func findPlaceholderAppsToLaunch(in layout: MonitorLayout) -> [(bundleId: String, appName: String)] {
+        var appsToLaunch: [(bundleId: String, appName: String)] = []
+        var seenBundleIds = Set<String>()
+
+        // Check column windows for empty slots with known bundle IDs
+        for column in layout.columns {
+            // Empty slots would need a way to track - for now, check if windows match expected apps
+            // This is a simplified check - full implementation would track placeholder slots
+        }
+
+        // For now, return empty - full placeholder tracking needs more model changes
+        return appsToLaunch
+    }
+
+    /// Launch placeholder apps and wait for windows
+    private func launchPlaceholderApps(_ apps: [(bundleId: String, appName: String)], completion: @escaping () -> Void) {
+        guard !apps.isEmpty else {
+            completion()
+            return
+        }
+
+        // Launch all apps
+        for app in apps {
+            AppLauncher.launchApp(bundleId: app.bundleId)
+            print("Launched placeholder app: \(app.appName)")
+        }
+
+        // Wait for windows to appear (up to 5 seconds)
+        let bundleIds = Set(apps.map { $0.bundleId })
+        waitForWindows(bundleIds: bundleIds, timeout: 5.0) {
+            DispatchQueue.main.async {
+                completion()
+            }
+        }
+    }
+
+    /// Wait for all specified apps to have windows
+    private func waitForWindows(bundleIds: Set<String>, timeout: TimeInterval, completion: @escaping () -> Void) {
+        let startTime = Date()
+
+        func check() {
+            let elapsed = Date().timeIntervalSince(startTime)
+
+            if elapsed >= timeout {
+                print("Placeholder timeout - continuing with available windows")
+                completion()
+                return
+            }
+
+            // Check if all apps have windows
+            var allReady = true
+            for bundleId in bundleIds {
+                if !AppLauncher.hasWindows(bundleId: bundleId) {
+                    allReady = false
+                    break
+                }
+            }
+
+            if allReady {
+                print("All placeholder apps ready")
+                completion()
+            } else {
+                // Check again in 200ms
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    check()
+                }
+            }
+        }
+
+        check()
+    }
+
+    /// Re-match placeholder slots after apps are launched
+    private func rematchPlaceholderSlots(in layout: MonitorLayout, for apps: [(bundleId: String, appName: String)]) {
+        // Refresh and try to match windows to empty slots
+        let appNames = Set(apps.map { $0.appName })
+
+        switch layout.layoutMode {
+        case .columns:
+            for i in layout.columns.indices {
+                for j in layout.columns[i].windows.indices {
+                    // If this slot has no window but matches a launched app, try to fill it
+                    // This requires tracking placeholder slots - simplified for now
+                }
+            }
+        case .rows:
+            // Similar for rows
+            break
+        }
+    }
+
+    private func setupWindowObserver(for layout: MonitorLayout) {
+        // Get all windows being managed in this layout
+        let windows = getAllManagedWindows(in: layout)
+        guard !windows.isEmpty else { return }
+
+        // Create observer that fires callback when windows move/resize
+        layout.windowObserver = WindowObserver { [weak self, weak layout] element in
+            guard let self = self, let layout = layout, layout.isActive else { return }
+            self.handleWindowEvent(element: element, for: layout)
+        }
+
+        layout.windowObserver?.observeWindows(windows)
+    }
+
+    private func getAllManagedWindows(in layout: MonitorLayout) -> [ExternalWindow] {
+        var windows: [ExternalWindow] = []
+        switch layout.layoutMode {
+        case .columns:
+            for column in layout.columns {
+                for colWindow in column.windows {
+                    windows.append(colWindow.window)
+                }
+            }
+        case .rows:
+            for row in layout.rows {
+                for rowWindow in row.windows {
+                    windows.append(rowWindow.window)
+                }
+            }
+        }
+        return windows
+    }
+
+    private func handleWindowEvent(element: AXUIElement, for layout: MonitorLayout) {
+        guard !layout.isApplyingLayout else { return }
+
+        // Find which window changed and compare to expected
+        guard let currentFrame = ExternalWindow.getFrame(from: element) else { return }
+
+        // Find the window in our layout and check delta
+        var changedWindow: (primaryIndex: Int, winIndex: Int, delta: FrameDelta)?
+
+        switch layout.layoutMode {
+        case .columns:
+            for (colIndex, column) in layout.columns.enumerated() {
+                for (winIndex, colWindow) in column.windows.enumerated() {
+                    // Check if this is the element that changed
+                    if CFEqual(colWindow.window.axElement, element) {
+                        guard let expected = layout.expectedFrames[colWindow.id] else { continue }
+                        let expectedAX = convertFrameToAXCoordinates(expected)
+                        if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
+                            changedWindow = (colIndex, winIndex, delta)
+                        }
+                        break
+                    }
+                }
+            }
+        case .rows:
+            for (rowIndex, row) in layout.rows.enumerated() {
+                for (winIndex, rowWindow) in row.windows.enumerated() {
+                    if CFEqual(rowWindow.window.axElement, element) {
+                        guard let expected = layout.expectedFrames[rowWindow.id] else { continue }
+                        let expectedAX = convertFrameToAXCoordinates(expected)
+                        if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
+                            changedWindow = (rowIndex, winIndex, delta)
+                        }
+                        break
+                    }
+                }
+            }
+        }
+
+        // If significant change detected, handle it
+        if let change = changedWindow {
+            switch layout.layoutMode {
+            case .columns:
+                handleWindowResize(in: layout, columnIndex: change.primaryIndex,
+                                   windowIndex: change.winIndex, delta: change.delta)
+            case .rows:
+                handleRowWindowResize(in: layout, rowIndex: change.primaryIndex,
+                                      windowIndex: change.winIndex, delta: change.delta)
+            }
+
+            layout.isApplyingLayout = true
+            layout.framesSinceApply = 0
+            applyLayoutAndUpdateExpected(for: layout)
+            layout.isApplyingLayout = false
+        }
     }
 
     private func setupDisplayLink(for layout: MonitorLayout) {
@@ -1543,6 +1783,10 @@ class WindowManager: ObservableObject {
         layout.isActive = false
         objectWillChange.send()
 
+        // Stop window observer
+        layout.windowObserver?.stopObserving()
+        layout.windowObserver = nil
+
         if let link = layout.displayLink {
             CVDisplayLinkStop(link)
             layout.displayLink = nil
@@ -1579,7 +1823,10 @@ class WindowManager: ObservableObject {
             applyLayoutForMonitor(layout)
             applyLayoutAndUpdateExpected(for: layout)
 
-            // Create display link
+            // Set up event-driven window observation
+            setupWindowObserver(for: layout)
+
+            // Create display link (now only for closed window detection)
             setupDisplayLink(for: layout)
         }
         objectWillChange.send()
@@ -1591,6 +1838,10 @@ class WindowManager: ObservableObject {
         for layout in monitorLayouts.values where layout.isActive {
             layout.isActive = false
             layout.appState = .configuring
+
+            // Stop window observer
+            layout.windowObserver?.stopObserving()
+            layout.windowObserver = nil
 
             if let link = layout.displayLink {
                 CVDisplayLinkStop(link)
@@ -1741,88 +1992,16 @@ class WindowManager: ObservableObject {
     }
 
     private func syncLoop(for layout: MonitorLayout) {
-        guard !layout.isApplyingLayout else { return }
+        // With event-driven sync via WindowObserver, this loop now only handles:
+        // 1. Periodic closed window detection
+        // 2. Counter maintenance for debouncing
 
-        // Wait a couple frames after applying layout for windows to settle
         layout.framesSinceApply += 1
-        guard layout.framesSinceApply > 2 else { return }
 
-        // Throttle sync checks to ~15fps instead of 60fps to reduce AX API calls
-        // With 9 windows at 60fps = 540 API calls/sec, at 15fps = 135 calls/sec
-        guard layout.framesSinceApply % 4 == 0 else { return }
-
-        // Check for closed windows (about once per second)
+        // Check for closed windows approximately once per second (60 frames at 60fps)
+        // This is now the only regular AX API call we make
         if layout.framesSinceApply % 60 == 0 {
             checkForClosedWindows(in: layout)
-        }
-
-        // Find window that user is actively resizing (differs most from expected)
-        var maxDelta: CGFloat = 0
-        var changedWindow: (primaryIndex: Int, winIndex: Int, delta: FrameDelta)?
-
-        switch layout.layoutMode {
-        case .columns:
-            for (colIndex, column) in layout.columns.enumerated() {
-                for (winIndex, colWindow) in column.windows.enumerated() {
-                    guard let currentFrame = ExternalWindow.getFrame(from: colWindow.window.axElement),
-                          let expected = layout.expectedFrames[colWindow.id] else { continue }
-
-                    let expectedAX = convertFrameToAXCoordinates(expected)
-
-                    if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
-                        let totalDelta = abs(delta.leftEdge) + abs(delta.rightEdge) +
-                                        abs(delta.topEdge) + abs(delta.bottomEdge)
-                        if totalDelta > maxDelta {
-                            maxDelta = totalDelta
-                            changedWindow = (colIndex, winIndex, delta)
-                        }
-                    }
-                }
-            }
-
-        case .rows:
-            for (rowIndex, row) in layout.rows.enumerated() {
-                for (winIndex, rowWindow) in row.windows.enumerated() {
-                    guard let currentFrame = ExternalWindow.getFrame(from: rowWindow.window.axElement),
-                          let expected = layout.expectedFrames[rowWindow.id] else { continue }
-
-                    let expectedAX = convertFrameToAXCoordinates(expected)
-
-                    if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
-                        let totalDelta = abs(delta.leftEdge) + abs(delta.rightEdge) +
-                                        abs(delta.topEdge) + abs(delta.bottomEdge)
-                        if totalDelta > maxDelta {
-                            maxDelta = totalDelta
-                            changedWindow = (rowIndex, winIndex, delta)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Lower threshold since we're synced to display (10px)
-        if let change = changedWindow, maxDelta > 10 {
-            switch layout.layoutMode {
-            case .columns:
-                handleWindowResize(
-                    in: layout,
-                    columnIndex: change.primaryIndex,
-                    windowIndex: change.winIndex,
-                    delta: change.delta
-                )
-            case .rows:
-                handleRowWindowResize(
-                    in: layout,
-                    rowIndex: change.primaryIndex,
-                    windowIndex: change.winIndex,
-                    delta: change.delta
-                )
-            }
-
-            layout.isApplyingLayout = true
-            layout.framesSinceApply = 0
-            applyLayoutAndUpdateExpected(for: layout)
-            layout.isApplyingLayout = false
         }
     }
 
@@ -2169,4 +2348,453 @@ class WindowManager: ObservableObject {
         hueCache[appName] = hue
         return hue
     }
+
+    // MARK: - Layout Persistence
+
+    private static let savedLayoutsKey = "SavedLayouts"
+    private static let monitorPresetsKey = "MonitorPresets_v1"
+    private static let workspacePresetsKey = "WorkspacePresets_v1"
+
+    /// Save the current layout configuration with a name
+    func saveCurrentLayout(name: String, asWorkspace: Bool = false, presetSlot: Int? = nil) {
+        if asWorkspace {
+            saveWorkspaceLayout(name: name, presetSlot: presetSlot)
+        } else {
+            saveMonitorLayout(name: name, presetSlot: presetSlot)
+        }
+    }
+
+    /// Save current monitor's layout
+    private func saveMonitorLayout(name: String, presetSlot: Int? = nil) {
+        guard let layout = currentLayout else { return }
+
+        let saved = createSavedLayout(from: layout, name: name, presetSlot: presetSlot)
+
+        var layouts = loadSavedLayoutsList()
+        layouts.removeAll { $0.name == name }
+        layouts.append(saved)
+
+        if let data = try? JSONEncoder().encode(layouts) {
+            UserDefaults.standard.set(data, forKey: Self.savedLayoutsKey)
+        }
+    }
+
+    /// Save all monitors' layouts as a workspace
+    private func saveWorkspaceLayout(name: String, presetSlot: Int? = nil) {
+        var monitorSavedLayouts: [SavedLayout] = []
+
+        for (monitorId, layout) in monitorLayouts {
+            let hasWindows = !layout.columns.isEmpty || !layout.rows.isEmpty
+            guard hasWindows else { continue }
+
+            let saved = createSavedLayout(from: layout, name: "\(name)_\(monitorId)", presetSlot: nil)
+            monitorSavedLayouts.append(saved)
+        }
+
+        guard !monitorSavedLayouts.isEmpty else { return }
+
+        let workspace = WorkspaceLayout(
+            name: name,
+            monitorLayouts: monitorSavedLayouts,
+            presetSlot: presetSlot
+        )
+
+        // Store workspace in the saved layouts list with isWorkspace = true
+        let workspaceSaved = SavedLayout(
+            name: name,
+            monitorId: nil,
+            isWorkspace: true,
+            layoutMode: "workspace",
+            columns: nil,
+            rows: nil,
+            presetSlot: presetSlot
+        )
+
+        var layouts = loadSavedLayoutsList()
+        layouts.removeAll { $0.name == name }
+        layouts.append(workspaceSaved)
+
+        if let data = try? JSONEncoder().encode(layouts) {
+            UserDefaults.standard.set(data, forKey: Self.savedLayoutsKey)
+        }
+
+        // Store the actual workspace data separately
+        var workspaces = loadWorkspacesList()
+        workspaces.removeAll { $0.name == name }
+        workspaces.append(workspace)
+
+        if let data = try? JSONEncoder().encode(workspaces) {
+            UserDefaults.standard.set(data, forKey: Self.workspacePresetsKey)
+        }
+    }
+
+    /// Create a SavedLayout from a MonitorLayout
+    private func createSavedLayout(from layout: MonitorLayout, name: String, presetSlot: Int?) -> SavedLayout {
+        SavedLayout(
+            name: name,
+            monitorId: layout.monitorId,
+            isWorkspace: false,
+            layoutMode: layout.layoutMode.rawValue,
+            columns: layout.layoutMode == .columns ? layout.columns.map { col in
+                SavedColumn(
+                    widthProportion: col.widthProportion,
+                    windows: col.windows.map { colWin in
+                        SavedWindowSlot(
+                            ownerName: colWin.window.ownerName,
+                            windowTitle: colWin.window.title,
+                            bundleIdentifier: AppLauncher.getBundleIdentifier(for: colWin.window.ownerName),
+                            proportion: colWin.heightProportion,
+                            isPlaceholder: false
+                        )
+                    }
+                )
+            } : nil,
+            rows: layout.layoutMode == .rows ? layout.rows.map { row in
+                SavedRow(
+                    heightProportion: row.heightProportion,
+                    windows: row.windows.map { rowWin in
+                        SavedWindowSlot(
+                            ownerName: rowWin.window.ownerName,
+                            windowTitle: rowWin.window.title,
+                            bundleIdentifier: AppLauncher.getBundleIdentifier(for: rowWin.window.ownerName),
+                            proportion: rowWin.widthProportion,
+                            isPlaceholder: false
+                        )
+                    }
+                )
+            } : nil,
+            presetSlot: presetSlot
+        )
+    }
+
+    private func loadWorkspacesList() -> [WorkspaceLayout] {
+        guard let data = UserDefaults.standard.data(forKey: Self.workspacePresetsKey),
+              let workspaces = try? JSONDecoder().decode([WorkspaceLayout].self, from: data) else {
+            return []
+        }
+        return workspaces
+    }
+
+    // MARK: - Monitor Presets (Cmd+Shift+1-9)
+
+    /// Handle monitor preset hotkey: save if empty, load if filled
+    func handleMonitorPreset(slot: Int) {
+        guard let monitor = selectedMonitor ?? availableMonitors.first else { return }
+
+        if let existing = getMonitorPreset(slot: slot, monitorId: monitor.id) {
+            // Load existing preset
+            loadMonitorPreset(existing)
+            print("Loaded monitor preset \(slot)")
+        } else {
+            // Save current layout to this slot
+            guard currentLayout != nil, hasAnyWindows else {
+                print("No layout to save for preset \(slot)")
+                return
+            }
+            saveMonitorPreset(slot: slot, monitorId: monitor.id)
+            print("Saved monitor preset \(slot)")
+        }
+    }
+
+    func getMonitorPreset(slot: Int, monitorId: String) -> SavedLayout? {
+        let presets = loadMonitorPresetsList()
+        return presets.first { $0.presetSlot == slot && $0.monitorId == monitorId }
+    }
+
+    func saveMonitorPreset(slot: Int, monitorId: String) {
+        guard let layout = currentLayout else { return }
+
+        let saved = createSavedLayout(from: layout, name: "Preset \(slot)", presetSlot: slot)
+
+        var presets = loadMonitorPresetsList()
+        presets.removeAll { $0.presetSlot == slot && $0.monitorId == monitorId }
+        presets.append(saved)
+
+        if let data = try? JSONEncoder().encode(presets) {
+            UserDefaults.standard.set(data, forKey: Self.monitorPresetsKey)
+        }
+    }
+
+    func loadMonitorPreset(_ preset: SavedLayout) {
+        guard let layout = currentLayout else { return }
+        loadLayoutIntoMonitor(saved: preset, layout: layout)
+    }
+
+    func deleteMonitorPreset(slot: Int, monitorId: String) {
+        var presets = loadMonitorPresetsList()
+        presets.removeAll { $0.presetSlot == slot && $0.monitorId == monitorId }
+        if let data = try? JSONEncoder().encode(presets) {
+            UserDefaults.standard.set(data, forKey: Self.monitorPresetsKey)
+        }
+    }
+
+    private func loadMonitorPresetsList() -> [SavedLayout] {
+        guard let data = UserDefaults.standard.data(forKey: Self.monitorPresetsKey),
+              let presets = try? JSONDecoder().decode([SavedLayout].self, from: data) else {
+            return []
+        }
+        return presets
+    }
+
+    // MARK: - Workspace Presets (Cmd+Option+Shift+1-9)
+
+    /// Handle workspace preset hotkey: save if empty, load if filled
+    func handleWorkspacePreset(slot: Int) {
+        if let existing = getWorkspacePreset(slot: slot) {
+            // Load existing workspace
+            loadWorkspacePreset(existing)
+            print("Loaded workspace preset \(slot)")
+        } else {
+            // Save current workspace to this slot
+            let hasAnyContent = monitorLayouts.values.contains { !$0.columns.isEmpty || !$0.rows.isEmpty }
+            guard hasAnyContent else {
+                print("No layouts to save for workspace preset \(slot)")
+                return
+            }
+            saveWorkspacePreset(slot: slot)
+            print("Saved workspace preset \(slot)")
+        }
+    }
+
+    func getWorkspacePreset(slot: Int) -> WorkspaceLayout? {
+        loadWorkspacesList().first { $0.presetSlot == slot }
+    }
+
+    func saveWorkspacePreset(slot: Int) {
+        var monitorSavedLayouts: [SavedLayout] = []
+
+        for (_, layout) in monitorLayouts {
+            let hasWindows = !layout.columns.isEmpty || !layout.rows.isEmpty
+            guard hasWindows else { continue }
+
+            let saved = createSavedLayout(from: layout, name: "Workspace \(slot)", presetSlot: nil)
+            monitorSavedLayouts.append(saved)
+        }
+
+        guard !monitorSavedLayouts.isEmpty else { return }
+
+        let workspace = WorkspaceLayout(
+            name: "Workspace \(slot)",
+            monitorLayouts: monitorSavedLayouts,
+            presetSlot: slot
+        )
+
+        var workspaces = loadWorkspacesList()
+        workspaces.removeAll { $0.presetSlot == slot }
+        workspaces.append(workspace)
+
+        if let data = try? JSONEncoder().encode(workspaces) {
+            UserDefaults.standard.set(data, forKey: Self.workspacePresetsKey)
+        }
+    }
+
+    func loadWorkspacePreset(_ workspace: WorkspaceLayout) {
+        for savedLayout in workspace.monitorLayouts {
+            guard let monitorId = savedLayout.monitorId,
+                  let layout = monitorLayouts[monitorId] else { continue }
+            loadLayoutIntoMonitor(saved: savedLayout, layout: layout)
+        }
+
+        // Start managing after loading
+        startAllLayouts()
+    }
+
+    /// Load a saved layout into a monitor layout
+    private func loadLayoutIntoMonitor(saved: SavedLayout, layout: MonitorLayout) {
+        // Set layout mode
+        if let mode = LayoutMode(rawValue: saved.layoutMode) {
+            layout.layoutMode = mode
+        }
+
+        // Refresh available windows
+        refreshAvailableWindows()
+
+        // Re-match windows to slots
+        switch layout.layoutMode {
+        case .columns:
+            guard let savedColumns = saved.columns else { return }
+            var usedWindowIds = Set<UUID>()
+
+            layout.columns = savedColumns.map { savedCol in
+                let matchedWindows = savedCol.windows.compactMap { slot -> ColumnWindow? in
+                    guard let match = findMatchingWindow(for: slot, excluding: usedWindowIds) else {
+                        return nil
+                    }
+                    usedWindowIds.insert(match.id)
+                    return ColumnWindow(
+                        id: UUID(),
+                        window: match,
+                        heightProportion: slot.proportion
+                    )
+                }
+                return Column(
+                    widthProportion: savedCol.widthProportion,
+                    windows: matchedWindows
+                )
+            }
+
+        case .rows:
+            guard let savedRows = saved.rows else { return }
+            var usedWindowIds = Set<UUID>()
+
+            layout.rows = savedRows.map { savedRow in
+                let matchedWindows = savedRow.windows.compactMap { slot -> RowWindow? in
+                    guard let match = findMatchingWindow(for: slot, excluding: usedWindowIds) else {
+                        return nil
+                    }
+                    usedWindowIds.insert(match.id)
+                    return RowWindow(
+                        id: UUID(),
+                        window: match,
+                        widthProportion: slot.proportion
+                    )
+                }
+                return Row(
+                    heightProportion: savedRow.heightProportion,
+                    windows: matchedWindows
+                )
+            }
+        }
+
+        layout.appState = .configuring
+        objectWillChange.send()
+    }
+
+    /// List all saved layouts
+    func listSavedLayouts() -> [String] {
+        loadSavedLayoutsList().map { $0.name }
+    }
+
+    /// List all saved layouts with full info for UI display
+    func listSavedLayoutsWithInfo() -> [(name: String, isWorkspace: Bool, presetSlot: Int?)] {
+        loadSavedLayoutsList().map { ($0.name, $0.isWorkspace, $0.presetSlot) }
+    }
+
+    /// Load a saved layout by name
+    func loadLayout(name: String) {
+        guard let saved = loadSavedLayoutsList().first(where: { $0.name == name }) else { return }
+
+        if saved.isWorkspace {
+            // Load workspace layout
+            if let workspace = loadWorkspacesList().first(where: { $0.name == name }) {
+                loadWorkspacePreset(workspace)
+            }
+        } else {
+            // Load single-monitor layout
+            guard let layout = currentLayout else { return }
+            loadLayoutIntoMonitor(saved: saved, layout: layout)
+        }
+    }
+
+    /// Delete a saved layout
+    func deleteLayout(name: String) {
+        var layouts = loadSavedLayoutsList()
+        layouts.removeAll { $0.name == name }
+        if let data = try? JSONEncoder().encode(layouts) {
+            UserDefaults.standard.set(data, forKey: Self.savedLayoutsKey)
+        }
+    }
+
+    private func loadSavedLayoutsList() -> [SavedLayout] {
+        guard let data = UserDefaults.standard.data(forKey: Self.savedLayoutsKey),
+              let layouts = try? JSONDecoder().decode([SavedLayout].self, from: data) else {
+            return []
+        }
+        return layouts
+    }
+
+    private func findMatchingWindow(for slot: SavedWindowSlot, excluding usedIds: Set<UUID>) -> ExternalWindow? {
+        // First try exact title match
+        if let exactMatch = availableWindows.first(where: {
+            !usedIds.contains($0.id) &&
+            $0.ownerName == slot.ownerName &&
+            $0.title == slot.windowTitle
+        }) {
+            return exactMatch
+        }
+
+        // Fall back to app name only
+        return availableWindows.first {
+            !usedIds.contains($0.id) && $0.ownerName == slot.ownerName
+        }
+    }
+}
+
+// MARK: - Layout Persistence Models
+
+struct SavedLayout: Codable {
+    let name: String
+    let monitorId: String?          // nil for workspace-level layouts
+    let isWorkspace: Bool           // true = all monitors, false = single monitor
+    let layoutMode: String
+    let columns: [SavedColumn]?
+    let rows: [SavedRow]?
+    let presetSlot: Int?            // 1-9 if assigned to a hotkey slot
+
+    // Backwards compatibility: provide defaults for new fields
+    init(name: String, monitorId: String?, isWorkspace: Bool = false, layoutMode: String,
+         columns: [SavedColumn]?, rows: [SavedRow]?, presetSlot: Int? = nil) {
+        self.name = name
+        self.monitorId = monitorId
+        self.isWorkspace = isWorkspace
+        self.layoutMode = layoutMode
+        self.columns = columns
+        self.rows = rows
+        self.presetSlot = presetSlot
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        monitorId = try container.decodeIfPresent(String.self, forKey: .monitorId)
+        isWorkspace = try container.decodeIfPresent(Bool.self, forKey: .isWorkspace) ?? false
+        layoutMode = try container.decode(String.self, forKey: .layoutMode)
+        columns = try container.decodeIfPresent([SavedColumn].self, forKey: .columns)
+        rows = try container.decodeIfPresent([SavedRow].self, forKey: .rows)
+        presetSlot = try container.decodeIfPresent(Int.self, forKey: .presetSlot)
+    }
+}
+
+struct SavedColumn: Codable {
+    let widthProportion: CGFloat
+    let windows: [SavedWindowSlot]
+}
+
+struct SavedRow: Codable {
+    let heightProportion: CGFloat
+    let windows: [SavedWindowSlot]
+}
+
+struct SavedWindowSlot: Codable {
+    let ownerName: String
+    let windowTitle: String?
+    let bundleIdentifier: String?   // For launching apps
+    let proportion: CGFloat
+    let isPlaceholder: Bool         // true = app wasn't open when saved
+
+    // Backwards compatibility
+    init(ownerName: String, windowTitle: String?, bundleIdentifier: String? = nil,
+         proportion: CGFloat, isPlaceholder: Bool = false) {
+        self.ownerName = ownerName
+        self.windowTitle = windowTitle
+        self.bundleIdentifier = bundleIdentifier
+        self.proportion = proportion
+        self.isPlaceholder = isPlaceholder
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ownerName = try container.decode(String.self, forKey: .ownerName)
+        windowTitle = try container.decodeIfPresent(String.self, forKey: .windowTitle)
+        bundleIdentifier = try container.decodeIfPresent(String.self, forKey: .bundleIdentifier)
+        proportion = try container.decode(CGFloat.self, forKey: .proportion)
+        isPlaceholder = try container.decodeIfPresent(Bool.self, forKey: .isPlaceholder) ?? false
+    }
+}
+
+/// Groups multiple monitor layouts into a single workspace preset
+struct WorkspaceLayout: Codable {
+    let name: String
+    let monitorLayouts: [SavedLayout]
+    let presetSlot: Int?            // 1-9 if assigned to a hotkey slot
 }

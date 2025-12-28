@@ -344,3 +344,104 @@ class WindowDiscovery {
         return ExternalWindow(axElement: focusedWindow as! AXUIElement, pid: pid, ownerName: appName)
     }
 }
+
+// MARK: - App Launcher Helper
+
+/// Helper for launching apps and looking up bundle identifiers
+struct AppLauncher {
+
+    /// Get bundle identifier from app name
+    static func getBundleIdentifier(for appName: String) -> String? {
+        // Method 1: Check running apps first (fastest)
+        if let running = NSWorkspace.shared.runningApplications.first(where: {
+            $0.localizedName == appName
+        }) {
+            return running.bundleIdentifier
+        }
+
+        // Method 2: Search Applications folders
+        let appPaths = [
+            "/Applications",
+            "/System/Applications",
+            "/Applications/Utilities",
+            NSHomeDirectory() + "/Applications"
+        ]
+
+        for basePath in appPaths {
+            let appPath = "\(basePath)/\(appName).app"
+            if FileManager.default.fileExists(atPath: appPath),
+               let bundle = Bundle(path: appPath) {
+                return bundle.bundleIdentifier
+            }
+        }
+
+        return nil
+    }
+
+    /// Launch an app by bundle identifier
+    @discardableResult
+    static func launchApp(bundleId: String) -> Bool {
+        guard let url = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: bundleId
+        ) else { return false }
+
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = false  // Don't bring to front immediately
+
+        var success = false
+        let semaphore = DispatchSemaphore(value: 0)
+
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, error in
+            success = (error == nil)
+            semaphore.signal()
+        }
+
+        // Wait briefly for the launch to complete
+        _ = semaphore.wait(timeout: .now() + 2.0)
+        return success
+    }
+
+    /// Check if an app is currently running
+    static func isAppRunning(bundleId: String) -> Bool {
+        NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == bundleId
+        }
+    }
+
+    /// Check if an app has any windows
+    static func hasWindows(bundleId: String) -> Bool {
+        let windows = WindowDiscovery.discoverAllWindows()
+        return windows.contains { window in
+            getBundleIdentifier(for: window.ownerName) == bundleId
+        }
+    }
+
+    /// Get all installed applications
+    static func getInstalledApps() -> [(name: String, bundleId: String, path: String)] {
+        var apps: [(name: String, bundleId: String, path: String)] = []
+
+        let appPaths = [
+            "/Applications",
+            "/System/Applications",
+            NSHomeDirectory() + "/Applications"
+        ]
+
+        for basePath in appPaths {
+            guard let contents = try? FileManager.default.contentsOfDirectory(atPath: basePath) else {
+                continue
+            }
+
+            for name in contents where name.hasSuffix(".app") {
+                let appPath = "\(basePath)/\(name)"
+                let appName = String(name.dropLast(4))
+
+                if let bundle = Bundle(path: appPath),
+                   let bundleId = bundle.bundleIdentifier {
+                    apps.append((appName, bundleId, appPath))
+                }
+            }
+        }
+
+        return apps.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+}

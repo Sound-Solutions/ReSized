@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import ServiceManagement
 
 // MARK: - Drag and Drop Data
 
@@ -559,6 +560,9 @@ struct ConfigureLayoutView: View {
                 }
 
                 Spacer()
+
+                // Layout save/load menu
+                LayoutMenu()
 
                 Button("Start") {
                     windowManager.startManaging()
@@ -1383,18 +1387,205 @@ struct ActiveRowWindowTile: View {
     }
 }
 
+// MARK: - Layout Save/Load Menu
+
+struct LayoutMenu: View {
+    @EnvironmentObject var windowManager: WindowManager
+    @State private var showingSaveDialog = false
+    @State private var layoutName = ""
+    @State private var saveAsWorkspace = false
+    @State private var selectedPresetSlot = 0  // 0 = None, 1-9 = slot
+    @State private var savedLayouts: [SavedLayoutInfo] = []
+
+    struct SavedLayoutInfo: Identifiable {
+        let id = UUID()
+        let name: String
+        let isWorkspace: Bool
+        let presetSlot: Int?
+    }
+
+    var body: some View {
+        Menu {
+            Button("Save Layout...") {
+                showingSaveDialog = true
+            }
+            .disabled(!windowManager.hasAnyWindows)
+
+            if !savedLayouts.isEmpty {
+                Divider()
+
+                ForEach(savedLayouts) { layout in
+                    Button {
+                        windowManager.loadLayout(name: layout.name)
+                    } label: {
+                        HStack {
+                            Text(layout.name)
+                            if layout.isWorkspace {
+                                Text("(Workspace)")
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let slot = layout.presetSlot {
+                                Text("[\(slot)]")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+
+                Divider()
+
+                Menu("Delete Layout") {
+                    ForEach(savedLayouts) { layout in
+                        Button(layout.name, role: .destructive) {
+                            windowManager.deleteLayout(name: layout.name)
+                            refreshLayouts()
+                        }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "square.and.arrow.down")
+        }
+        .onAppear {
+            refreshLayouts()
+        }
+        .sheet(isPresented: $showingSaveDialog) {
+            VStack(spacing: 16) {
+                Text("Save Layout")
+                    .font(.headline)
+
+                TextField("Layout Name", text: $layoutName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 280)
+
+                // Scope picker
+                Picker("Scope", selection: $saveAsWorkspace) {
+                    Text("Current Monitor Only").tag(false)
+                    Text("Full Workspace (All Monitors)").tag(true)
+                }
+                .pickerStyle(.radioGroup)
+                .frame(width: 280)
+
+                // Preset slot picker
+                HStack {
+                    Text("Assign to preset:")
+                    Picker("", selection: $selectedPresetSlot) {
+                        Text("None").tag(0)
+                        ForEach(1...9, id: \.self) { slot in
+                            if saveAsWorkspace {
+                                Text("⌘⌥⇧\(slot)").tag(slot)
+                            } else {
+                                Text("⌘⇧\(slot)").tag(slot)
+                            }
+                        }
+                    }
+                    .frame(width: 100)
+                }
+
+                HStack {
+                    Button("Cancel") {
+                        resetDialog()
+                    }
+
+                    Button("Save") {
+                        if !layoutName.isEmpty {
+                            windowManager.saveCurrentLayout(
+                                name: layoutName,
+                                asWorkspace: saveAsWorkspace,
+                                presetSlot: selectedPresetSlot > 0 ? selectedPresetSlot : nil
+                            )
+                            refreshLayouts()
+                            resetDialog()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(layoutName.isEmpty)
+                }
+            }
+            .padding()
+            .frame(width: 320)
+        }
+    }
+
+    private func resetDialog() {
+        showingSaveDialog = false
+        layoutName = ""
+        saveAsWorkspace = false
+        selectedPresetSlot = 0
+    }
+
+    private func refreshLayouts() {
+        savedLayouts = windowManager.listSavedLayoutsWithInfo().map {
+            SavedLayoutInfo(name: $0.name, isWorkspace: $0.isWorkspace, presetSlot: $0.presetSlot)
+        }
+    }
+}
+
 // MARK: - Settings
 
 struct SettingsView: View {
+    @State private var launchAtLogin = LaunchAtLogin.isEnabled
+
     var body: some View {
         Form {
             Section("General") {
-                Text("Settings coming soon...")
+                Toggle("Launch at Login", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { newValue in
+                        LaunchAtLogin.setEnabled(newValue)
+                    }
+            }
+
+            Section("Keyboard Shortcuts") {
+                ShortcutRow(action: "Toggle Start/Stop", shortcut: "⌘⇧R")
+                Divider()
+                ShortcutRow(action: "Monitor Presets 1-9", shortcut: "⌘⇧1-9")
+                Text("Quick-save if empty, quick-load if filled")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Divider()
+                ShortcutRow(action: "Workspace Presets 1-9", shortcut: "⌘⌥⇧1-9")
+                Text("Save/load all monitors at once")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .padding()
-        .frame(width: 400, height: 200)
+        .frame(width: 400, height: 280)
+    }
+}
+
+struct ShortcutRow: View {
+    let action: String
+    let shortcut: String
+
+    var body: some View {
+        HStack {
+            Text(action)
+            Spacer()
+            Text(shortcut)
+                .foregroundStyle(.secondary)
+                .font(.system(.body, design: .monospaced))
+        }
+    }
+}
+
+// MARK: - Launch at Login Helper
+
+enum LaunchAtLogin {
+    static var isEnabled: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    static func setEnabled(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            print("LaunchAtLogin error: \(error)")
+        }
     }
 }
 
