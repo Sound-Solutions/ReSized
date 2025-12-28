@@ -54,8 +54,73 @@ struct PermissionOverlay: View {
     }
 }
 
+// MARK: - Trial Expired Overlay
+
+struct TrialExpiredOverlay: View {
+    @ObservedObject var licenseManager: LicenseManager
+    @State private var enteredKey: String = ""
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.6)
+                .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                Image(systemName: "clock.badge.exclamationmark")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.orange)
+
+                Text("Trial Expired")
+                    .font(.headline)
+
+                Text("Your 7-day trial has ended. Enter a license key or purchase one to continue using ReSized.")
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 280)
+
+                VStack(spacing: 12) {
+                    HStack {
+                        TextField("Enter license key", text: $enteredKey)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+
+                        Button(licenseManager.isValidating ? "..." : "Activate") {
+                            licenseManager.saveLicenseKey(enteredKey)
+                            licenseManager.validateLicense { success, _ in
+                                if success {
+                                    enteredKey = ""
+                                }
+                            }
+                        }
+                        .disabled(enteredKey.isEmpty || licenseManager.isValidating)
+                    }
+                    .frame(maxWidth: 300)
+
+                    if let error = licenseManager.validationError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    Button("Buy License") {
+                        licenseManager.openPurchasePage()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(.top, 8)
+            }
+            .padding(24)
+            .background(Color(NSColor.windowBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .shadow(radius: 20)
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var windowManager: WindowManager
+    @StateObject private var licenseManager = LicenseManager.shared
     @State private var hasAccessibilityPermission = false
     @State private var permissionTimer: Timer?
 
@@ -69,15 +134,26 @@ struct ContentView: View {
             case .configuring:
                 ConfigureLayoutView()
                     .overlay {
+                        // Show permission overlay first if needed
                         if !hasAccessibilityPermission {
                             PermissionOverlay {
                                 AccessibilityHelper.requestAccessibilityPermissions()
                                 startPermissionPolling()
                             }
                         }
+                        // Then show trial expired overlay if applicable
+                        else if case .trialExpired = licenseManager.licenseState {
+                            TrialExpiredOverlay(licenseManager: licenseManager)
+                        }
                     }
             case .active:
                 ActiveLayoutView()
+                    .overlay {
+                        // Also block active state if trial expired
+                        if case .trialExpired = licenseManager.licenseState {
+                            TrialExpiredOverlay(licenseManager: licenseManager)
+                        }
+                    }
             }
         }
         .frame(minWidth: 700, minHeight: 500)
@@ -1704,10 +1780,56 @@ struct LayoutMenu: View {
 // MARK: - Settings
 
 struct SettingsView: View {
+    @StateObject private var licenseManager = LicenseManager.shared
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
+    @State private var enteredKey: String = ""
 
     var body: some View {
         Form {
+            // License Section
+            Section("License") {
+                LicenseStatusRow(state: licenseManager.licenseState)
+
+                if case .licensed = licenseManager.licenseState {
+                    // Already licensed
+                    HStack {
+                        Text("License Key")
+                        Spacer()
+                        Text(maskedKey(licenseManager.licenseKey))
+                            .foregroundStyle(.secondary)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                } else {
+                    // Trial or expired - show key entry
+                    HStack {
+                        TextField("Enter license key", text: $enteredKey)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+
+                        Button(licenseManager.isValidating ? "Validating..." : "Activate") {
+                            licenseManager.saveLicenseKey(enteredKey)
+                            licenseManager.validateLicense { success, error in
+                                if success {
+                                    enteredKey = ""
+                                }
+                            }
+                        }
+                        .disabled(enteredKey.isEmpty || licenseManager.isValidating)
+                    }
+
+                    if let error = licenseManager.validationError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    Button("Buy License") {
+                        licenseManager.openPurchasePage()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+
             Section("General") {
                 Toggle("Launch at Login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { newValue in
@@ -1730,7 +1852,56 @@ struct SettingsView: View {
             }
         }
         .padding()
-        .frame(width: 400, height: 280)
+        .frame(width: 400, height: 380)
+    }
+
+    private func maskedKey(_ key: String) -> String {
+        guard key.count > 8 else { return key }
+        let prefix = key.prefix(4)
+        let suffix = key.suffix(4)
+        return "\(prefix)...\(suffix)"
+    }
+}
+
+struct LicenseStatusRow: View {
+    let state: LicenseState
+
+    var body: some View {
+        HStack {
+            Text("Status")
+            Spacer()
+            statusBadge
+        }
+    }
+
+    @ViewBuilder
+    private var statusBadge: some View {
+        switch state {
+        case .trial(let daysRemaining):
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(.orange)
+                    .frame(width: 8, height: 8)
+                Text("Trial - \(daysRemaining) day\(daysRemaining == 1 ? "" : "s") left")
+                    .foregroundStyle(.secondary)
+            }
+        case .trialExpired:
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(.red)
+                    .frame(width: 8, height: 8)
+                Text("Trial Expired")
+                    .foregroundStyle(.red)
+            }
+        case .licensed:
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(.green)
+                    .frame(width: 8, height: 8)
+                Text("Licensed")
+                    .foregroundStyle(.green)
+            }
+        }
     }
 }
 
