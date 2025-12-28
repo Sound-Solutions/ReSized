@@ -1729,9 +1729,14 @@ class WindowManager: ObservableObject {
         case .columns:
             for (colIndex, column) in layout.columns.enumerated() {
                 for colWindow in column.windows {
+                    // Only remove if we can't get the frame AND the process is dead
+                    // This prevents removing windows during sleep when AX calls timeout
                     if ExternalWindow.getFrame(from: colWindow.window.axElement) == nil {
-                        DispatchQueue.main.async { [weak self] in
-                            self?.removeWindow(colWindow.id, fromColumn: colIndex, in: layout)
+                        let processExists = kill(colWindow.window.ownerPID, 0) == 0
+                        if !processExists {
+                            DispatchQueue.main.async { [weak self] in
+                                self?.removeWindow(colWindow.id, fromColumn: colIndex, in: layout)
+                            }
                         }
                     }
                 }
@@ -1739,9 +1744,13 @@ class WindowManager: ObservableObject {
         case .rows:
             for (rowIndex, row) in layout.rows.enumerated() {
                 for rowWindow in row.windows {
+                    // Only remove if we can't get the frame AND the process is dead
                     if ExternalWindow.getFrame(from: rowWindow.window.axElement) == nil {
-                        DispatchQueue.main.async { [weak self] in
-                            self?.removeWindow(rowWindow.id, fromRow: rowIndex, in: layout)
+                        let processExists = kill(rowWindow.window.ownerPID, 0) == 0
+                        if !processExists {
+                            DispatchQueue.main.async { [weak self] in
+                                self?.removeWindow(rowWindow.id, fromRow: rowIndex, in: layout)
+                            }
                         }
                     }
                 }
@@ -1754,9 +1763,18 @@ class WindowManager: ObservableObject {
 
         layout.columns[columnIndex].windows.removeAll { $0.id == windowId }
 
-        // Recalculate proportions
-        let count = layout.columns[columnIndex].windows.count
-        if count > 0 {
+        // Remove empty column and redistribute widths
+        if layout.columns[columnIndex].windows.isEmpty {
+            layout.columns.remove(at: columnIndex)
+            if !layout.columns.isEmpty {
+                let newWidth = 1.0 / CGFloat(layout.columns.count)
+                for i in 0..<layout.columns.count {
+                    layout.columns[i].widthProportion = newWidth
+                }
+            }
+        } else {
+            // Recalculate height proportions within column
+            let count = layout.columns[columnIndex].windows.count
             let newProportion = 1.0 / CGFloat(count)
             for i in 0..<count {
                 layout.columns[columnIndex].windows[i].heightProportion = newProportion
@@ -1772,9 +1790,18 @@ class WindowManager: ObservableObject {
 
         layout.rows[rowIndex].windows.removeAll { $0.id == windowId }
 
-        // Recalculate proportions
-        let count = layout.rows[rowIndex].windows.count
-        if count > 0 {
+        // Remove empty row and redistribute heights
+        if layout.rows[rowIndex].windows.isEmpty {
+            layout.rows.remove(at: rowIndex)
+            if !layout.rows.isEmpty {
+                let newHeight = 1.0 / CGFloat(layout.rows.count)
+                for i in 0..<layout.rows.count {
+                    layout.rows[i].heightProportion = newHeight
+                }
+            }
+        } else {
+            // Recalculate width proportions within row
+            let count = layout.rows[rowIndex].windows.count
             let newProportion = 1.0 / CGFloat(count)
             for i in 0..<count {
                 layout.rows[rowIndex].windows[i].widthProportion = newProportion
