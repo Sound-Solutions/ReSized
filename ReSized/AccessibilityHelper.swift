@@ -51,6 +51,9 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
     // MARK: - Window Properties
 
     static func getFrame(from element: AXUIElement) -> CGRect? {
+        // Set a short timeout to prevent hanging on dead windows
+        AXUIElementSetMessagingTimeout(element, 0.1)
+
         var positionValue: CFTypeRef?
         var sizeValue: CFTypeRef?
 
@@ -95,6 +98,9 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
     // MARK: - Window Manipulation
 
     func setFrame(_ newFrame: CGRect) -> Bool {
+        // Set a short timeout to prevent hanging on dead windows
+        AXUIElementSetMessagingTimeout(axElement, 0.1)
+
         // Convert the frame to AX coordinates
         // NSScreen: origin is bottom-left, Y=0 at bottom, Y increases upward
         // AX/Quartz: origin is top-left, Y=0 at top, Y increases downward
@@ -154,6 +160,7 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
     // MARK: - Size Constraints
 
     var minSize: CGSize {
+        AXUIElementSetMessagingTimeout(axElement, 0.1)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axElement, "AXMinimumSize" as CFString, &value) == .success else {
             return CGSize(width: 100, height: 100)
@@ -164,6 +171,7 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
     }
 
     var maxSize: CGSize {
+        AXUIElementSetMessagingTimeout(axElement, 0.1)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axElement, "AXMaximumSize" as CFString, &value) == .success else {
             return CGSize(width: 10000, height: 10000)
