@@ -269,8 +269,12 @@ class WindowDiscovery {
     static func discoverAllWindows() -> [ExternalWindow] {
         var windows: [ExternalWindow] = []
 
+        // Get our own bundle identifier to exclude ourselves
+        let ourBundleId = Bundle.main.bundleIdentifier
+
         let runningApps = NSWorkspace.shared.runningApplications.filter {
-            $0.activationPolicy == .regular
+            $0.activationPolicy == .regular &&
+            $0.bundleIdentifier != ourBundleId  // Exclude ReSized
         }
 
         for app in runningApps {

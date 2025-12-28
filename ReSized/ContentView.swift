@@ -6,12 +6,12 @@ struct ContentView: View {
     var body: some View {
         Group {
             switch windowManager.appState {
+            case .modeSelect:
+                LayoutModePickerView()
             case .monitorSelect:
                 MonitorSelectView()
-            case .setup:
-                SetupView()
             case .configuring:
-                ConfigureColumnsView()
+                ConfigureLayoutView()
             case .active:
                 ActiveLayoutView()
             }
@@ -24,9 +24,183 @@ struct ContentView: View {
             }
             windowManager.refreshMonitors()
 
-            // Auto-scan all monitors on launch
+            // Show mode picker on first launch
             if windowManager.selectedMonitor == nil {
-                windowManager.scanAllMonitors()
+                windowManager.appState = .modeSelect
+            }
+        }
+    }
+}
+
+// MARK: - Layout Mode Picker View
+
+struct LayoutModePickerView: View {
+    @EnvironmentObject var windowManager: WindowManager
+    @State private var hoveredMode: LayoutMode?
+
+    var body: some View {
+        VStack(spacing: 30) {
+            Text("ReSized")
+                .font(.largeTitle)
+                .fontWeight(.bold)
+
+            Text("Choose your layout style")
+                .font(.title2)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 24) {
+                // Columns mode card
+                LayoutModeCard(
+                    mode: .columns,
+                    isHovered: hoveredMode == .columns,
+                    isDisabled: false
+                ) {
+                    windowManager.setModeAndScan(.columns)
+                }
+                .onHover { hovering in
+                    hoveredMode = hovering ? .columns : nil
+                }
+
+                // Rows mode card
+                LayoutModeCard(
+                    mode: .rows,
+                    isHovered: hoveredMode == .rows,
+                    isDisabled: false
+                ) {
+                    windowManager.setModeAndScan(.rows)
+                }
+                .onHover { hovering in
+                    hoveredMode = hovering ? .rows : nil
+                }
+
+                // Mix mode card (greyed out - Phase 2)
+                LayoutModeCard(
+                    mode: nil,
+                    isHovered: false,
+                    isDisabled: true
+                ) {}
+            }
+
+            Text("You can switch modes anytime from the layout editor")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+}
+
+struct LayoutModeCard: View {
+    let mode: LayoutMode?
+    let isHovered: Bool
+    let isDisabled: Bool
+    let action: () -> Void
+
+    private var title: String {
+        mode?.rawValue ?? "Mix"
+    }
+
+    private var description: String {
+        switch mode {
+        case .columns:
+            return "Side-by-side windows\nwith vertical dividers"
+        case .rows:
+            return "Stacked windows\nwith horizontal dividers"
+        case nil:
+            return "Nested splits\n(Coming soon)"
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 16) {
+                // Visual preview
+                LayoutModePreviewIcon(mode: mode)
+                    .frame(width: 100, height: 70)
+
+                VStack(spacing: 4) {
+                    Text(title)
+                        .font(.headline)
+                        .fontWeight(.semibold)
+
+                    Text(description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .frame(width: 150, height: 160)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(isHovered ? Color.accentColor.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(
+                        isHovered ? Color.accentColor : Color(nsColor: .separatorColor),
+                        lineWidth: isHovered ? 2 : 1
+                    )
+            )
+            .opacity(isDisabled ? 0.5 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .cursor(isDisabled ? .arrow : .pointingHand)
+    }
+}
+
+struct LayoutModePreviewIcon: View {
+    let mode: LayoutMode?
+
+    var body: some View {
+        switch mode {
+        case .columns:
+            // 3 vertical bars
+            HStack(spacing: 4) {
+                ForEach(0..<3, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.accentColor.opacity(0.3))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .strokeBorder(Color.accentColor, lineWidth: 1)
+                        )
+                }
+            }
+        case .rows:
+            // 3 horizontal bars
+            VStack(spacing: 4) {
+                ForEach(0..<3, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.accentColor.opacity(0.3))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .strokeBorder(Color.accentColor, lineWidth: 1)
+                        )
+                }
+            }
+        case nil:
+            // Mix mode - grid pattern
+            VStack(spacing: 4) {
+                HStack(spacing: 4) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.gray.opacity(0.2))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 3)
+                                .strokeBorder(Color.gray.opacity(0.5), lineWidth: 1)
+                        )
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.gray.opacity(0.2))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 3)
+                                .strokeBorder(Color.gray.opacity(0.5), lineWidth: 1)
+                        )
+                }
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.gray.opacity(0.2))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(Color.gray.opacity(0.5), lineWidth: 1)
+                    )
             }
         }
     }
@@ -241,125 +415,13 @@ struct MonitorTab: View {
     }
 }
 
-// MARK: - Setup View (Choose Column Count)
+// MARK: - Configure Layout View
 
-struct SetupView: View {
+struct ConfigureLayoutView: View {
     @EnvironmentObject var windowManager: WindowManager
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Monitor tabs
-            MonitorTabs()
-
-            Divider()
-
-            VStack(spacing: 30) {
-                Spacer()
-
-                Text("How many columns?")
-                    .font(.title)
-                    .fontWeight(.bold)
-
-                HStack(spacing: 20) {
-                    ForEach(1...4, id: \.self) { count in
-                        ColumnCountButton(count: count) {
-                            windowManager.setupColumns(count: count)
-                        }
-                    }
-                }
-
-                Text("You can add multiple windows to each column")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                // Divider with "or"
-                HStack {
-                    Rectangle()
-                        .fill(Color(nsColor: .separatorColor))
-                        .frame(height: 1)
-                    Text("or")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Rectangle()
-                        .fill(Color(nsColor: .separatorColor))
-                        .frame(height: 1)
-                }
-                .frame(maxWidth: 300)
-
-                // Scan existing layout button
-                Button {
-                    _ = windowManager.scanExistingLayout()
-                } label: {
-                    VStack(spacing: 8) {
-                        Image(systemName: "rectangle.3.group")
-                            .font(.system(size: 24))
-                        Text("Use Current Layout")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                        Text("Scan windows on this monitor")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(width: 180, height: 80)
-                    .background(Color(nsColor: .controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
-                    )
-                }
-                .buttonStyle(.plain)
-
-                Spacer()
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding()
-        }
-    }
-}
-
-struct ColumnCountButton: View {
-    let count: Int
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 12) {
-                // Visual preview of columns
-                HStack(spacing: 2) {
-                    ForEach(0..<count, id: \.self) { _ in
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.accentColor.opacity(0.3))
-                            .frame(width: 20, height: 50)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .strokeBorder(Color.accentColor, lineWidth: 1)
-                            )
-                    }
-                }
-
-                Text("\(count)")
-                    .font(.title)
-                    .fontWeight(.semibold)
-            }
-            .frame(width: 100, height: 100)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Configure Columns View
-
-struct ConfigureColumnsView: View {
-    @EnvironmentObject var windowManager: WindowManager
-    @State private var selectedColumn: Int = 0
+    @State private var selectedIndex: Int = 0
     @State private var showingWindowPicker = false
+    @State private var useCurrentLayout: Bool = true  // Track if using scanned layout
 
     var body: some View {
         VStack(spacing: 0) {
@@ -371,33 +433,101 @@ struct ConfigureColumnsView: View {
             // Header
             HStack {
                 Button {
-                    windowManager.resetSetup()
+                    windowManager.appState = .modeSelect
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "chevron.left")
-                        Text("Setup")
+                        Text("Mode")
                     }
                 }
 
                 Spacer()
 
-                // Column controls
+                // Mode toggle
+                Picker("Mode", selection: Binding(
+                    get: { windowManager.layoutMode },
+                    set: { newMode in
+                        windowManager.layoutMode = newMode
+                        // Clear other mode's data and rescan
+                        if newMode == .columns {
+                            windowManager.rows = []
+                        } else {
+                            windowManager.columns = []
+                        }
+                        // Auto-rescan with new mode
+                        if useCurrentLayout {
+                            _ = windowManager.scanExistingLayout()
+                        } else {
+                            if newMode == .columns {
+                                windowManager.setupColumns(count: 2)
+                            } else {
+                                windowManager.setupRows(count: 2)
+                            }
+                        }
+                        selectedIndex = 0
+                    }
+                )) {
+                    Text("Columns").tag(LayoutMode.columns)
+                    Text("Rows").tag(LayoutMode.rows)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 160)
+
+                // Scan toggle button
+                Button {
+                    useCurrentLayout.toggle()
+                    if useCurrentLayout {
+                        _ = windowManager.scanExistingLayout()
+                    } else {
+                        // Switch to blank layout
+                        if windowManager.layoutMode == .columns {
+                            windowManager.setupColumns(count: 2)
+                        } else {
+                            windowManager.setupRows(count: 2)
+                        }
+                    }
+                    selectedIndex = 0
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: useCurrentLayout ? "rectangle.3.group.fill" : "rectangle.3.group")
+                        Text(useCurrentLayout ? "Scanned" : "Blank")
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(useCurrentLayout ? Color.accentColor.opacity(0.2) : Color.clear)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                // Primary division controls (columns or rows)
                 HStack(spacing: 8) {
                     Button {
-                        if windowManager.columns.count > 1 {
-                            windowManager.removeColumn(at: windowManager.columns.count - 1)
+                        if windowManager.layoutMode == .columns {
+                            if windowManager.columns.count > 1 {
+                                windowManager.removeColumn(at: windowManager.columns.count - 1)
+                            }
+                        } else {
+                            if windowManager.rows.count > 1 {
+                                windowManager.removeRow(at: windowManager.rows.count - 1)
+                            }
                         }
                     } label: {
                         Image(systemName: "minus")
                     }
-                    .disabled(windowManager.columns.count <= 1)
+                    .disabled(windowManager.primaryCount <= 1)
 
-                    Text("\(windowManager.columns.count) columns")
+                    Text("\(windowManager.primaryCount) \(windowManager.layoutMode == .columns ? "columns" : "rows")")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 
                     Button {
-                        windowManager.addColumn()
+                        if windowManager.layoutMode == .columns {
+                            windowManager.addColumn()
+                        } else {
+                            windowManager.addRow()
+                        }
                     } label: {
                         Image(systemName: "plus")
                     }
@@ -417,55 +547,85 @@ struct ConfigureColumnsView: View {
 
             // Main content
             HStack(spacing: 0) {
-                // Column layout preview
-                ColumnLayoutPreview(selectedColumn: $selectedColumn)
-                    .frame(minWidth: 400)
+                // Layout preview - flexible, takes ALL remaining space
+                LayoutPreview(selectedIndex: $selectedIndex)
+                    .frame(maxWidth: .infinity)
 
                 Divider()
 
-                // Window picker sidebar
-                WindowPickerSidebar(selectedColumn: $selectedColumn)
+                // Window picker sidebar - fixed 280px, always on right
+                WindowPickerSidebar(selectedIndex: $selectedIndex)
                     .frame(width: 280)
             }
         }
     }
 }
 
-struct ColumnLayoutPreview: View {
+struct LayoutPreview: View {
     @EnvironmentObject var windowManager: WindowManager
-    @Binding var selectedColumn: Int
+    @Binding var selectedIndex: Int
 
     var body: some View {
         GeometryReader { geometry in
-            HStack(spacing: 0) {
-                ForEach(Array(windowManager.columns.enumerated()), id: \.element.id) { index, column in
-                    ColumnPreview(
-                        column: column,
-                        columnIndex: index,
-                        isSelected: selectedColumn == index,
-                        containerSize: geometry.size,
-                        canRemove: windowManager.columns.count > 1,
-                        onRemove: {
-                            windowManager.removeColumn(at: index)
-                            // Adjust selection if needed
-                            if selectedColumn >= windowManager.columns.count {
-                                selectedColumn = max(0, windowManager.columns.count - 1)
-                            }
+            if windowManager.layoutMode == .columns {
+                // Columns mode: horizontal arrangement
+                HStack(spacing: 0) {
+                    ForEach(Array(windowManager.columns.enumerated()), id: \.element.id) { index, column in
+                        ColumnPreview(
+                            column: column,
+                            columnIndex: index,
+                            isSelected: selectedIndex == index,
+                            containerSize: geometry.size,
+                            canRemove: windowManager.columns.count > 1,
+                            onRemove: {
+                                windowManager.removeColumn(at: index)
+                                if selectedIndex >= windowManager.columns.count {
+                                    selectedIndex = max(0, windowManager.columns.count - 1)
+                                }
+                            },
+                            totalColumns: windowManager.columns.count
+                        )
+                        .onTapGesture {
+                            selectedIndex = index
                         }
-                    )
-                    .onTapGesture {
-                        selectedColumn = index
-                    }
 
-                    // Column divider (except after last column)
-                    if index < windowManager.columns.count - 1 {
-                        ColumnDividerHandle(dividerIndex: index)
+                        if index < windowManager.columns.count - 1 {
+                            ColumnDividerHandle(dividerIndex: index)
+                        }
                     }
                 }
+                .padding()
+            } else {
+                // Rows mode: vertical arrangement
+                VStack(spacing: 0) {
+                    ForEach(Array(windowManager.rows.enumerated()), id: \.element.id) { index, row in
+                        RowPreview(
+                            row: row,
+                            rowIndex: index,
+                            isSelected: selectedIndex == index,
+                            containerSize: geometry.size,
+                            canRemove: windowManager.rows.count > 1,
+                            onRemove: {
+                                windowManager.removeRow(at: index)
+                                if selectedIndex >= windowManager.rows.count {
+                                    selectedIndex = max(0, windowManager.rows.count - 1)
+                                }
+                            },
+                            totalRows: windowManager.rows.count
+                        )
+                        .onTapGesture {
+                            selectedIndex = index
+                        }
+
+                        if index < windowManager.rows.count - 1 {
+                            RowPrimaryDividerHandle(dividerIndex: index)
+                        }
+                    }
+                }
+                .padding()
             }
-            .padding()
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color(white: 0.1))
     }
 }
 
@@ -476,6 +636,7 @@ struct ColumnPreview: View {
     let containerSize: CGSize
     let canRemove: Bool
     let onRemove: () -> Void
+    let totalColumns: Int
     @EnvironmentObject var windowManager: WindowManager
 
     var body: some View {
@@ -549,7 +710,7 @@ struct ColumnPreview: View {
                 )
             }
         }
-        .frame(width: (containerSize.width - 32) * column.widthProportion - 8)
+        .frame(width: max(60, ((containerSize.width - 32) - CGFloat(totalColumns - 1) * 8) * column.widthProportion))
     }
 }
 
@@ -590,9 +751,8 @@ struct WindowTilePreview: View {
     }
 
     private func colorForApp(_ name: String) -> Color {
-        let hash = abs(name.hashValue)
-        let hue = Double(hash % 360) / 360.0
-        return Color(hue: hue, saturation: 0.5, brightness: 0.35)
+        let hue = windowManager.hueForApp(name)
+        return Color(hue: hue, saturation: 1.0, brightness: 0.5).opacity(0.5)
     }
 }
 
@@ -661,11 +821,209 @@ struct RowDividerHandle: View {
     }
 }
 
+// MARK: - Row Mode Views
+
+struct RowPreview: View {
+    let row: Row
+    let rowIndex: Int
+    let isSelected: Bool
+    let containerSize: CGSize
+    let canRemove: Bool
+    let onRemove: () -> Void
+    let totalRows: Int
+    @EnvironmentObject var windowManager: WindowManager
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Row header with remove button
+            HStack(spacing: 4) {
+                Text("Row \(rowIndex + 1)")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundStyle(isSelected ? .primary : .secondary)
+
+                if canRemove {
+                    Button {
+                        onRemove()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 4)
+
+            // Windows in row
+            if row.windows.isEmpty {
+                HStack {
+                    Spacer()
+                    VStack {
+                        Image(systemName: "plus.rectangle.on.rectangle")
+                            .font(.title)
+                            .foregroundStyle(.secondary)
+                        Text("Add windows")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(
+                            isSelected ? Color.accentColor : Color(nsColor: .separatorColor),
+                            lineWidth: isSelected ? 2 : 1,
+                            antialiased: true
+                        )
+                )
+            } else {
+                HStack(spacing: 0) {
+                    ForEach(Array(row.windows.enumerated()), id: \.element.id) { winIndex, rowWindow in
+                        RowWindowTilePreview(
+                            rowWindow: rowWindow,
+                            rowIndex: rowIndex,
+                            windowIndex: winIndex,
+                            widthProportion: rowWindow.widthProportion
+                        )
+
+                        // Window divider within row (except after last window)
+                        if winIndex < row.windows.count - 1 {
+                            RowWindowDividerHandle(rowIndex: rowIndex, dividerIndex: winIndex)
+                        }
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(
+                            isSelected ? Color.accentColor : Color(nsColor: .separatorColor),
+                            lineWidth: isSelected ? 2 : 1
+                        )
+                )
+            }
+        }
+        .frame(height: max(60, ((containerSize.height - 32) - CGFloat(totalRows - 1) * 8) * row.heightProportion))
+    }
+}
+
+struct RowWindowTilePreview: View {
+    let rowWindow: RowWindow
+    let rowIndex: Int
+    let windowIndex: Int
+    let widthProportion: CGFloat
+    @EnvironmentObject var windowManager: WindowManager
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(rowWindow.window.ownerName)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+
+                Text(rowWindow.window.title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Button {
+                windowManager.removeWindow(rowWindow.id, fromRow: rowIndex)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(colorForApp(rowWindow.window.ownerName))
+    }
+
+    private func colorForApp(_ name: String) -> Color {
+        let hue = windowManager.hueForApp(name)
+        return Color(hue: hue, saturation: 1.0, brightness: 0.5).opacity(0.5)
+    }
+}
+
+/// Horizontal divider between rows (for resizing row heights)
+struct RowPrimaryDividerHandle: View {
+    let dividerIndex: Int
+    @EnvironmentObject var windowManager: WindowManager
+    @State private var isDragging = false
+
+    var body: some View {
+        Rectangle()
+            .fill(isDragging ? Color.accentColor : Color(nsColor: .separatorColor))
+            .frame(height: 8)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture()
+                    .onChanged { value in
+                        isDragging = true
+                        windowManager.resizeRowPrimaryDivider(atIndex: dividerIndex, delta: value.translation.height)
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                    }
+            )
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.resizeUpDown.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+    }
+}
+
+/// Vertical divider between windows within a row (for resizing window widths)
+struct RowWindowDividerHandle: View {
+    let rowIndex: Int
+    let dividerIndex: Int
+    @EnvironmentObject var windowManager: WindowManager
+    @State private var isDragging = false
+
+    var body: some View {
+        Rectangle()
+            .fill(isDragging ? Color.accentColor : Color(nsColor: .separatorColor))
+            .frame(width: 6)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture()
+                    .onChanged { value in
+                        isDragging = true
+                        windowManager.resizeWindowDivider(
+                            inRow: rowIndex,
+                            atIndex: dividerIndex,
+                            delta: value.translation.width
+                        )
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                    }
+            )
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.resizeLeftRight.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+    }
+}
+
 // MARK: - Window Picker Sidebar
 
 struct WindowPickerSidebar: View {
     @EnvironmentObject var windowManager: WindowManager
-    @Binding var selectedColumn: Int
+    @Binding var selectedIndex: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -702,30 +1060,13 @@ struct WindowPickerSidebar: View {
                 ScrollView {
                     LazyVStack(spacing: 8) {
                         ForEach(windowManager.availableWindows) { window in
-                            AvailableWindowRow(window: window, targetColumn: selectedColumn)
+                            AvailableWindowRow(window: window, targetIndex: selectedIndex)
                         }
                     }
                     .padding()
                 }
             }
 
-            Divider()
-
-            // Column selector
-            HStack {
-                Text("Add to:")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Picker("", selection: $selectedColumn) {
-                    ForEach(0..<windowManager.columns.count, id: \.self) { index in
-                        Text("Column \(index + 1)").tag(index)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-            }
-            .padding()
         }
         .background(Color(nsColor: .controlBackgroundColor))
     }
@@ -733,12 +1074,16 @@ struct WindowPickerSidebar: View {
 
 struct AvailableWindowRow: View {
     let window: ExternalWindow
-    let targetColumn: Int
+    let targetIndex: Int
     @EnvironmentObject var windowManager: WindowManager
 
     var body: some View {
         Button {
-            windowManager.addWindow(window, toColumn: targetColumn)
+            if windowManager.layoutMode == .columns {
+                windowManager.addWindow(window, toColumn: targetIndex)
+            } else {
+                windowManager.addWindow(window, toRow: targetIndex)
+            }
         } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -821,26 +1166,51 @@ struct ActiveLayoutPreview: View {
 
     var body: some View {
         GeometryReader { geometry in
-            HStack(spacing: 0) {
-                ForEach(Array(windowManager.columns.enumerated()), id: \.element.id) { index, column in
-                    VStack(spacing: 0) {
-                        ForEach(Array(column.windows.enumerated()), id: \.element.id) { winIndex, colWindow in
-                            ActiveWindowTile(columnWindow: colWindow)
-                                .frame(height: (geometry.size.height - 20) * colWindow.heightProportion)
+            if windowManager.layoutMode == .columns {
+                // Columns mode
+                HStack(spacing: 0) {
+                    ForEach(Array(windowManager.columns.enumerated()), id: \.element.id) { index, column in
+                        VStack(spacing: 0) {
+                            ForEach(Array(column.windows.enumerated()), id: \.element.id) { winIndex, colWindow in
+                                ActiveWindowTile(columnWindow: colWindow)
+                                    .frame(height: (geometry.size.height - 20) * colWindow.heightProportion)
 
-                            if winIndex < column.windows.count - 1 {
-                                RowDividerHandle(columnIndex: index, dividerIndex: winIndex)
+                                if winIndex < column.windows.count - 1 {
+                                    RowDividerHandle(columnIndex: index, dividerIndex: winIndex)
+                                }
                             }
                         }
-                    }
-                    .frame(width: (geometry.size.width - 20) * column.widthProportion)
+                        .frame(width: (geometry.size.width - 20) * column.widthProportion)
 
-                    if index < windowManager.columns.count - 1 {
-                        ColumnDividerHandle(dividerIndex: index)
+                        if index < windowManager.columns.count - 1 {
+                            ColumnDividerHandle(dividerIndex: index)
+                        }
                     }
                 }
+                .padding(10)
+            } else {
+                // Rows mode
+                VStack(spacing: 0) {
+                    ForEach(Array(windowManager.rows.enumerated()), id: \.element.id) { index, row in
+                        HStack(spacing: 0) {
+                            ForEach(Array(row.windows.enumerated()), id: \.element.id) { winIndex, rowWindow in
+                                ActiveRowWindowTile(rowWindow: rowWindow)
+                                    .frame(width: (geometry.size.width - 20) * rowWindow.widthProportion)
+
+                                if winIndex < row.windows.count - 1 {
+                                    RowWindowDividerHandle(rowIndex: index, dividerIndex: winIndex)
+                                }
+                            }
+                        }
+                        .frame(height: (geometry.size.height - 20) * row.heightProportion)
+
+                        if index < windowManager.rows.count - 1 {
+                            RowPrimaryDividerHandle(dividerIndex: index)
+                        }
+                    }
+                }
+                .padding(10)
             }
-            .padding(10)
         }
         .background(Color(nsColor: .windowBackgroundColor))
     }
@@ -848,6 +1218,7 @@ struct ActiveLayoutPreview: View {
 
 struct ActiveWindowTile: View {
     let columnWindow: ColumnWindow
+    @EnvironmentObject var windowManager: WindowManager
 
     var body: some View {
         VStack(spacing: 4) {
@@ -869,9 +1240,37 @@ struct ActiveWindowTile: View {
     }
 
     private func colorForApp(_ name: String) -> Color {
-        let hash = abs(name.hashValue)
-        let hue = Double(hash % 360) / 360.0
-        return Color(hue: hue, saturation: 0.5, brightness: 0.35)
+        let hue = windowManager.hueForApp(name)
+        return Color(hue: hue, saturation: 1.0, brightness: 0.5).opacity(0.5)
+    }
+}
+
+struct ActiveRowWindowTile: View {
+    let rowWindow: RowWindow
+    @EnvironmentObject var windowManager: WindowManager
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(rowWindow.window.ownerName)
+                .font(.caption)
+                .fontWeight(.medium)
+
+            Text(rowWindow.window.title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(colorForApp(rowWindow.window.ownerName))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .onTapGesture {
+            rowWindow.window.raise()
+        }
+    }
+
+    private func colorForApp(_ name: String) -> Color {
+        let hue = windowManager.hueForApp(name)
+        return Color(hue: hue, saturation: 1.0, brightness: 0.5).opacity(0.5)
     }
 }
 

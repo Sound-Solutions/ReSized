@@ -80,11 +80,45 @@ struct Column: Identifiable, Equatable {
     }
 }
 
+// MARK: - Row-Based Layout (alternative to columns)
+
+/// Layout mode determines primary division direction
+enum LayoutMode: String, CaseIterable {
+    case columns = "Columns"  // Vertical primary splits (side-by-side)
+    case rows = "Rows"        // Horizontal primary splits (stacked)
+    // case mix = "Mix"       // Phase 2: Tree-based nested splits
+}
+
+/// A window placed in a row with its width proportion within that row
+struct RowWindow: Identifiable, Equatable {
+    let id: UUID
+    var window: ExternalWindow
+    /// Width proportion within the row (0.0 to 1.0)
+    var widthProportion: CGFloat
+
+    static func == (lhs: RowWindow, rhs: RowWindow) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
+/// A row containing horizontally arranged windows
+struct Row: Identifiable, Equatable {
+    let id = UUID()
+    /// Height proportion of the screen (0.0 to 1.0)
+    var heightProportion: CGFloat
+    /// Windows arranged horizontally in this row
+    var windows: [RowWindow]
+
+    static func == (lhs: Row, rhs: Row) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
 /// App state for the setup flow
 enum AppState {
+    case modeSelect     // First open: choosing layout mode (columns vs rows)
     case monitorSelect  // Choosing which monitor
-    case setup          // Choosing column count
-    case configuring    // Adding windows to columns
+    case configuring    // Adding windows to layout
     case active         // Layout is active and managing windows
 }
 
@@ -122,8 +156,10 @@ class MonitorLayout: ObservableObject {
     let monitorId: String
     let screen: NSScreen
 
-    @Published var columns: [Column] = []
-    @Published var appState: AppState = .setup
+    @Published var layoutMode: LayoutMode = .columns
+    @Published var columns: [Column] = []  // Used when layoutMode == .columns
+    @Published var rows: [Row] = []        // Used when layoutMode == .rows
+    @Published var appState: AppState = .modeSelect
     @Published var containerBounds: CGRect = .zero
     @Published var isActive: Bool = false
 
@@ -182,12 +218,38 @@ class WindowManager: ObservableObject {
         }
     }
 
+    var layoutMode: LayoutMode {
+        get { currentLayout?.layoutMode ?? .columns }
+        set {
+            guard let layout = currentLayout else { return }
+            layout.layoutMode = newValue
+            objectWillChange.send()
+        }
+    }
+
     var columns: [Column] {
         get { currentLayout?.columns ?? [] }
         set {
             guard let layout = currentLayout else { return }
             layout.columns = newValue
             objectWillChange.send()
+        }
+    }
+
+    var rows: [Row] {
+        get { currentLayout?.rows ?? [] }
+        set {
+            guard let layout = currentLayout else { return }
+            layout.rows = newValue
+            objectWillChange.send()
+        }
+    }
+
+    /// Count of primary divisions (columns or rows based on mode)
+    var primaryCount: Int {
+        switch layoutMode {
+        case .columns: return columns.count
+        case .rows: return rows.count
         }
     }
 
@@ -284,13 +346,29 @@ class WindowManager: ObservableObject {
 
     // MARK: - Setup
 
+    /// Set layout mode for all monitors and proceed with scanning
+    func setModeAndScan(_ mode: LayoutMode) {
+        guard AccessibilityHelper.checkAccessibilityPermissions() else { return }
+
+        // Create layouts for all monitors with the chosen mode
+        for monitor in availableMonitors {
+            if monitorLayouts[monitor.id] == nil {
+                monitorLayouts[monitor.id] = MonitorLayout(monitor: monitor)
+            }
+            monitorLayouts[monitor.id]?.layoutMode = mode
+        }
+
+        // Now scan all monitors
+        scanAllMonitors()
+    }
+
     /// Scan all monitors on launch and select the main one
     func scanAllMonitors() {
         guard AccessibilityHelper.checkAccessibilityPermissions() else { return }
 
         // Scan each monitor
         for monitor in availableMonitors {
-            // Create layout for this monitor
+            // Create layout for this monitor if needed
             if monitorLayouts[monitor.id] == nil {
                 monitorLayouts[monitor.id] = MonitorLayout(monitor: monitor)
             }
@@ -305,8 +383,10 @@ class WindowManager: ObservableObject {
             selectMonitor(mainMonitor)
 
             // Ensure we're in configuring state (even if no windows found)
-            if columns.isEmpty {
+            if layoutMode == .columns && columns.isEmpty {
                 setupColumns(count: 2)  // Default to 2 columns
+            } else if layoutMode == .rows && rows.isEmpty {
+                setupRows(count: 2)  // Default to 2 rows
             }
             appState = .configuring
         }
@@ -320,6 +400,19 @@ class WindowManager: ObservableObject {
         let proportion = 1.0 / CGFloat(count)
         columns = (0..<count).map { _ in
             Column(widthProportion: proportion, windows: [])
+        }
+        appState = .configuring
+        refreshAvailableWindows()
+    }
+
+    /// Initialize with a specific number of rows
+    func setupRows(count: Int) {
+        // Stop any active management first
+        stopManaging()
+
+        let proportion = 1.0 / CGFloat(count)
+        rows = (0..<count).map { _ in
+            Row(heightProportion: proportion, windows: [])
         }
         appState = .configuring
         refreshAvailableWindows()
@@ -352,6 +445,22 @@ class WindowManager: ObservableObject {
 
         guard !windowsOnMonitor.isEmpty else { return false }
 
+        // Scan based on current layout mode
+        switch layoutMode {
+        case .columns:
+            scanAsColumns(windowsOnMonitor, monitor: monitor)
+        case .rows:
+            scanAsRows(windowsOnMonitor, monitor: monitor)
+        }
+
+        appState = .configuring
+        refreshAvailableWindows()
+
+        return true
+    }
+
+    /// Scan windows as column-based layout
+    private func scanAsColumns(_ windowsOnMonitor: [ExternalWindow], monitor: Monitor) {
         // Sort windows by X position to detect columns
         let sortedByX = windowsOnMonitor.sorted { $0.frame.minX < $1.frame.minX }
 
@@ -418,23 +527,90 @@ class WindowManager: ObservableObject {
         }
 
         columns = newColumns
-        appState = .configuring
-        refreshAvailableWindows()
+    }
 
-        return true
+    /// Scan windows as row-based layout
+    private func scanAsRows(_ windowsOnMonitor: [ExternalWindow], monitor: Monitor) {
+        // Sort windows by Y position to detect rows (top to bottom in AX coords)
+        let sortedByY = windowsOnMonitor.sorted { $0.frame.minY < $1.frame.minY }
+
+        // Group windows into rows (windows with similar Y positions)
+        var rowGroups: [[ExternalWindow]] = []
+        let rowThreshold: CGFloat = 50 // Windows within 50px are in same row
+
+        for window in sortedByY {
+            if let lastGroup = rowGroups.last,
+               let lastWindow = lastGroup.first,
+               abs(window.frame.minY - lastWindow.frame.minY) < rowThreshold {
+                // Add to existing row
+                rowGroups[rowGroups.count - 1].append(window)
+            } else {
+                // Start new row
+                rowGroups.append([window])
+            }
+        }
+
+        // Build rows with proportions
+        let totalHeight = monitor.frame.height
+        var newRows: [Row] = []
+
+        for group in rowGroups {
+            // Sort windows in row by X (left to right)
+            let sortedByX = group.sorted { $0.frame.minX < $1.frame.minX }
+
+            // Calculate row height from first window (they should all be similar)
+            let rowHeight = group.first?.frame.height ?? totalHeight / CGFloat(rowGroups.count)
+            let heightProportion = rowHeight / totalHeight
+
+            // Build windows with width proportions
+            let totalWidth = monitor.frame.width
+            var rowWindows: [RowWindow] = []
+
+            for window in sortedByX {
+                let widthProportion = window.frame.width / totalWidth
+                let rowWindow = RowWindow(
+                    id: window.id,
+                    window: window,
+                    widthProportion: widthProportion
+                )
+                rowWindows.append(rowWindow)
+            }
+
+            // Normalize width proportions within row
+            let widthSum = rowWindows.reduce(0) { $0 + $1.widthProportion }
+            if widthSum > 0 {
+                for i in 0..<rowWindows.count {
+                    rowWindows[i].widthProportion /= widthSum
+                }
+            }
+
+            newRows.append(Row(heightProportion: heightProportion, windows: rowWindows))
+        }
+
+        // Normalize row height proportions
+        let heightSum = newRows.reduce(0) { $0 + $1.heightProportion }
+        if heightSum > 0 {
+            for i in 0..<newRows.count {
+                newRows[i].heightProportion /= heightSum
+            }
+        }
+
+        rows = newRows
     }
 
     /// Reset to setup state
     func resetSetup() {
         stopManaging()
         columns = []
-        appState = .setup
+        rows = []
+        appState = .modeSelect
     }
 
     /// Reset completely to monitor selection
     func resetToMonitorSelect() {
         stopManaging()
         columns = []
+        rows = []
         selectedMonitor = nil
         appState = .monitorSelect
     }
@@ -449,8 +625,9 @@ class WindowManager: ObservableObject {
 
         let discovered = WindowDiscovery.discoverAllWindows()
 
-        // Filter out windows already in columns
-        let usedIds = Set(columns.flatMap { $0.windows.map { $0.window.id } })
+        // Filter out windows already in columns or rows
+        var usedIds = Set(columns.flatMap { $0.windows.map { $0.window.id } })
+        usedIds.formUnion(rows.flatMap { $0.windows.map { $0.window.id } })
         availableWindows = discovered.filter { !usedIds.contains($0.id) }
     }
 
@@ -543,6 +720,106 @@ class WindowManager: ObservableObject {
         }
 
         refreshAvailableWindows()
+    }
+
+    // MARK: - Row Management
+
+    /// Add a window to a specific row
+    func addWindow(_ window: ExternalWindow, toRow rowIndex: Int) {
+        guard rowIndex < rows.count else { return }
+
+        // Calculate new equal proportions for all windows in this row
+        let currentCount = rows[rowIndex].windows.count
+        let newProportion = 1.0 / CGFloat(currentCount + 1)
+
+        // Update existing windows' proportions
+        for i in 0..<rows[rowIndex].windows.count {
+            rows[rowIndex].windows[i].widthProportion = newProportion
+        }
+
+        // Add new window
+        let rowWindow = RowWindow(
+            id: window.id,
+            window: window,
+            widthProportion: newProportion
+        )
+        rows[rowIndex].windows.append(rowWindow)
+
+        refreshAvailableWindows()
+
+        if isActive {
+            applyLayout()
+        }
+    }
+
+    /// Remove a window from its row
+    func removeWindow(_ windowId: UUID, fromRow rowIndex: Int) {
+        guard rowIndex < rows.count else { return }
+
+        rows[rowIndex].windows.removeAll { $0.id == windowId }
+
+        // Recalculate proportions
+        let count = rows[rowIndex].windows.count
+        if count > 0 {
+            let newProportion = 1.0 / CGFloat(count)
+            for i in 0..<count {
+                rows[rowIndex].windows[i].widthProportion = newProportion
+            }
+        }
+
+        refreshAvailableWindows()
+
+        if isActive {
+            applyLayout()
+        }
+    }
+
+    /// Add a new empty row
+    func addRow() {
+        // Recalculate proportions to make room for new row
+        let newCount = rows.count + 1
+        let newProportion = 1.0 / CGFloat(newCount)
+
+        for i in 0..<rows.count {
+            rows[i].heightProportion = newProportion
+        }
+
+        rows.append(Row(heightProportion: newProportion, windows: []))
+        normalizeRowProportions()
+    }
+
+    /// Remove a row (and redistribute its height to remaining rows)
+    func removeRow(at index: Int) {
+        guard index < rows.count, rows.count > 1 else { return }
+
+        rows.remove(at: index)
+
+        // Redistribute heights equally
+        let newProportion = 1.0 / CGFloat(rows.count)
+        for i in 0..<rows.count {
+            rows[i].heightProportion = newProportion
+        }
+
+        refreshAvailableWindows()
+    }
+
+    /// Ensure all row height proportions sum to exactly 1.0
+    private func normalizeRowProportions() {
+        let total = rows.reduce(0) { $0 + $1.heightProportion }
+        guard total > 0 && abs(total - 1.0) > 0.0001 else { return }
+        for i in 0..<rows.count {
+            rows[i].heightProportion /= total
+        }
+    }
+
+    /// Ensure all window width proportions in a row sum to exactly 1.0
+    private func normalizeWindowProportions(inRow rowIndex: Int) {
+        guard rowIndex < rows.count else { return }
+        let total = rows[rowIndex].windows.reduce(0) { $0 + $1.widthProportion }
+        guard total > 0 && abs(total - 1.0) > 0.0001 else { return }
+        for i in 0..<rows[rowIndex].windows.count {
+            rows[rowIndex].windows[i].widthProportion /= total
+        }
     }
 
     // MARK: - Proportion Normalization
@@ -647,10 +924,78 @@ class WindowManager: ObservableObject {
         }
     }
 
+    // MARK: - Row Mode Resizing
+
+    /// Resize the primary divider between rows (affects row heights)
+    func resizeRowPrimaryDivider(atIndex dividerIndex: Int, delta: CGFloat) {
+        guard dividerIndex < rows.count - 1 else { return }
+
+        let proportionalDelta = delta / containerBounds.height
+
+        let topRow = dividerIndex
+        let bottomRow = dividerIndex + 1
+
+        // Minimum row height (10% of screen)
+        let minHeight: CGFloat = 0.1
+
+        let newTopHeight = rows[topRow].heightProportion + proportionalDelta
+        let newBottomHeight = rows[bottomRow].heightProportion - proportionalDelta
+
+        // Apply if both rows remain above minimum
+        if newTopHeight >= minHeight && newBottomHeight >= minHeight {
+            rows[topRow].heightProportion = newTopHeight
+            rows[bottomRow].heightProportion = newBottomHeight
+            normalizeRowProportions()
+
+            if isActive {
+                applyLayout()
+            }
+        }
+    }
+
+    /// Resize a window divider within a row (between windowIndex and windowIndex+1)
+    /// This only affects the two adjacent windows in that row
+    func resizeWindowDivider(inRow rowIndex: Int, atIndex dividerIndex: Int, delta: CGFloat) {
+        guard rowIndex < rows.count else { return }
+        guard dividerIndex < rows[rowIndex].windows.count - 1 else { return }
+
+        let proportionalDelta = delta / containerBounds.width
+
+        let leftWindow = dividerIndex
+        let rightWindow = dividerIndex + 1
+
+        // Minimum window width (10% of row)
+        let minWidth: CGFloat = 0.1
+
+        let newLeftWidth = rows[rowIndex].windows[leftWindow].widthProportion + proportionalDelta
+        let newRightWidth = rows[rowIndex].windows[rightWindow].widthProportion - proportionalDelta
+
+        // Apply if both windows remain above minimum
+        if newLeftWidth >= minWidth && newRightWidth >= minWidth {
+            rows[rowIndex].windows[leftWindow].widthProportion = newLeftWidth
+            rows[rowIndex].windows[rightWindow].widthProportion = newRightWidth
+            normalizeWindowProportions(inRow: rowIndex)
+
+            if isActive {
+                applyLayout()
+            }
+        }
+    }
+
     // MARK: - Layout Application
 
     /// Apply the current layout to actual windows
     func applyLayout() {
+        switch layoutMode {
+        case .columns:
+            applyColumnsLayout()
+        case .rows:
+            applyRowsLayout()
+        }
+    }
+
+    /// Apply column-based layout (vertical primary divisions)
+    private func applyColumnsLayout() {
         var currentX = containerBounds.minX
         let rightEdge = containerBounds.maxX
         let bottomEdge = containerBounds.minY
@@ -709,6 +1054,70 @@ class WindowManager: ObservableObject {
             }
 
             currentX += columnWidth
+        }
+    }
+
+    /// Apply row-based layout (horizontal primary divisions)
+    private func applyRowsLayout() {
+        // Start from top of screen and work down
+        var currentTop = containerBounds.maxY
+        let bottomEdge = containerBounds.minY
+        let rightEdge = containerBounds.maxX
+
+        for (rowIndex, row) in rows.enumerated() {
+            let isLastRow = (rowIndex == rows.count - 1)
+
+            // Last row fills to bottom edge exactly to avoid gaps
+            let rowHeight: CGFloat
+            if isLastRow {
+                rowHeight = currentTop - bottomEdge
+            } else {
+                rowHeight = row.heightProportion * containerBounds.height
+            }
+
+            // Start from left edge and work right
+            var currentX = containerBounds.minX
+
+            for (winIndex, rowWindow) in row.windows.enumerated() {
+                let isLastWindow = (winIndex == row.windows.count - 1)
+
+                // Last window fills to right edge exactly to avoid gaps
+                let windowWidth: CGFloat
+                if isLastWindow {
+                    windowWidth = rightEdge - currentX
+                } else {
+                    windowWidth = rowWindow.widthProportion * containerBounds.width
+                }
+
+                // Window origin is bottom-left, so y = top - height
+                var frame = CGRect(
+                    x: currentX,
+                    y: currentTop - rowHeight,
+                    width: windowWidth,
+                    height: rowHeight
+                )
+
+                // Respect window's min/max size constraints
+                frame = constrainFrame(frame, for: rowWindow.window)
+
+                // For last window in row, keep right edge aligned
+                if isLastWindow && frame.width < windowWidth {
+                    frame.origin.x = rightEdge - frame.width
+                }
+
+                // For last row, keep bottom edge aligned
+                if isLastRow && frame.height < rowHeight {
+                    frame.origin.y = bottomEdge
+                }
+
+                _ = rowWindow.window.setFrame(frame)
+
+                // Move right for next window
+                currentX += windowWidth
+            }
+
+            // Move down for next row
+            currentTop -= rowHeight
         }
     }
 
@@ -817,42 +1226,85 @@ class WindowManager: ObservableObject {
 
         // Store what we expect each window's frame to be
         layout.expectedFrames.removeAll()
-        var currentX = layout.containerBounds.minX
-        let rightEdge = layout.containerBounds.maxX
-        let bottomEdge = layout.containerBounds.minY
 
-        for (colIndex, column) in layout.columns.enumerated() {
-            let isLastColumn = (colIndex == layout.columns.count - 1)
+        switch layout.layoutMode {
+        case .columns:
+            var currentX = layout.containerBounds.minX
+            let rightEdge = layout.containerBounds.maxX
+            let bottomEdge = layout.containerBounds.minY
 
-            let columnWidth: CGFloat
-            if isLastColumn {
-                columnWidth = rightEdge - currentX
-            } else {
-                columnWidth = column.widthProportion * layout.containerBounds.width
-            }
+            for (colIndex, column) in layout.columns.enumerated() {
+                let isLastColumn = (colIndex == layout.columns.count - 1)
 
-            var currentTop = layout.containerBounds.maxY
-
-            for (winIndex, colWindow) in column.windows.enumerated() {
-                let isLastWindow = (winIndex == column.windows.count - 1)
-
-                let windowHeight: CGFloat
-                if isLastWindow {
-                    windowHeight = currentTop - bottomEdge
+                let columnWidth: CGFloat
+                if isLastColumn {
+                    columnWidth = rightEdge - currentX
                 } else {
-                    windowHeight = colWindow.heightProportion * layout.containerBounds.height
+                    columnWidth = column.widthProportion * layout.containerBounds.width
                 }
 
-                let expectedFrame = CGRect(
-                    x: currentX,
-                    y: currentTop - windowHeight,
-                    width: columnWidth,
-                    height: windowHeight
-                )
-                layout.expectedFrames[colWindow.id] = expectedFrame
-                currentTop -= windowHeight
+                var currentTop = layout.containerBounds.maxY
+
+                for (winIndex, colWindow) in column.windows.enumerated() {
+                    let isLastWindow = (winIndex == column.windows.count - 1)
+
+                    let windowHeight: CGFloat
+                    if isLastWindow {
+                        windowHeight = currentTop - bottomEdge
+                    } else {
+                        windowHeight = colWindow.heightProportion * layout.containerBounds.height
+                    }
+
+                    let expectedFrame = CGRect(
+                        x: currentX,
+                        y: currentTop - windowHeight,
+                        width: columnWidth,
+                        height: windowHeight
+                    )
+                    layout.expectedFrames[colWindow.id] = expectedFrame
+                    currentTop -= windowHeight
+                }
+                currentX += columnWidth
             }
-            currentX += columnWidth
+
+        case .rows:
+            var currentTop = layout.containerBounds.maxY
+            let bottomEdge = layout.containerBounds.minY
+            let rightEdge = layout.containerBounds.maxX
+
+            for (rowIndex, row) in layout.rows.enumerated() {
+                let isLastRow = (rowIndex == layout.rows.count - 1)
+
+                let rowHeight: CGFloat
+                if isLastRow {
+                    rowHeight = currentTop - bottomEdge
+                } else {
+                    rowHeight = row.heightProportion * layout.containerBounds.height
+                }
+
+                var currentX = layout.containerBounds.minX
+
+                for (winIndex, rowWindow) in row.windows.enumerated() {
+                    let isLastWindow = (winIndex == row.windows.count - 1)
+
+                    let windowWidth: CGFloat
+                    if isLastWindow {
+                        windowWidth = rightEdge - currentX
+                    } else {
+                        windowWidth = rowWindow.widthProportion * layout.containerBounds.width
+                    }
+
+                    let expectedFrame = CGRect(
+                        x: currentX,
+                        y: currentTop - rowHeight,
+                        width: windowWidth,
+                        height: rowHeight
+                    )
+                    layout.expectedFrames[rowWindow.id] = expectedFrame
+                    currentX += windowWidth
+                }
+                currentTop -= rowHeight
+            }
         }
     }
 
@@ -870,22 +1322,43 @@ class WindowManager: ObservableObject {
 
         // Find window that user is actively resizing (differs most from expected)
         var maxDelta: CGFloat = 0
-        var changedWindow: (colIndex: Int, winIndex: Int, delta: FrameDelta)?
+        var changedWindow: (primaryIndex: Int, winIndex: Int, delta: FrameDelta)?
 
-        for (colIndex, column) in layout.columns.enumerated() {
-            for (winIndex, colWindow) in column.windows.enumerated() {
-                guard let currentFrame = ExternalWindow.getFrame(from: colWindow.window.axElement),
-                      let expected = layout.expectedFrames[colWindow.id] else { continue }
+        switch layout.layoutMode {
+        case .columns:
+            for (colIndex, column) in layout.columns.enumerated() {
+                for (winIndex, colWindow) in column.windows.enumerated() {
+                    guard let currentFrame = ExternalWindow.getFrame(from: colWindow.window.axElement),
+                          let expected = layout.expectedFrames[colWindow.id] else { continue }
 
-                // Convert expected to AX coordinates for comparison
-                let expectedAX = convertFrameToAXCoordinates(expected)
+                    let expectedAX = convertFrameToAXCoordinates(expected)
 
-                if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
-                    let totalDelta = abs(delta.leftEdge) + abs(delta.rightEdge) +
-                                    abs(delta.topEdge) + abs(delta.bottomEdge)
-                    if totalDelta > maxDelta {
-                        maxDelta = totalDelta
-                        changedWindow = (colIndex, winIndex, delta)
+                    if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
+                        let totalDelta = abs(delta.leftEdge) + abs(delta.rightEdge) +
+                                        abs(delta.topEdge) + abs(delta.bottomEdge)
+                        if totalDelta > maxDelta {
+                            maxDelta = totalDelta
+                            changedWindow = (colIndex, winIndex, delta)
+                        }
+                    }
+                }
+            }
+
+        case .rows:
+            for (rowIndex, row) in layout.rows.enumerated() {
+                for (winIndex, rowWindow) in row.windows.enumerated() {
+                    guard let currentFrame = ExternalWindow.getFrame(from: rowWindow.window.axElement),
+                          let expected = layout.expectedFrames[rowWindow.id] else { continue }
+
+                    let expectedAX = convertFrameToAXCoordinates(expected)
+
+                    if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
+                        let totalDelta = abs(delta.leftEdge) + abs(delta.rightEdge) +
+                                        abs(delta.topEdge) + abs(delta.bottomEdge)
+                        if totalDelta > maxDelta {
+                            maxDelta = totalDelta
+                            changedWindow = (rowIndex, winIndex, delta)
+                        }
                     }
                 }
             }
@@ -893,12 +1366,22 @@ class WindowManager: ObservableObject {
 
         // Lower threshold since we're synced to display (10px)
         if let change = changedWindow, maxDelta > 10 {
-            handleWindowResize(
-                in: layout,
-                columnIndex: change.colIndex,
-                windowIndex: change.winIndex,
-                delta: change.delta
-            )
+            switch layout.layoutMode {
+            case .columns:
+                handleWindowResize(
+                    in: layout,
+                    columnIndex: change.primaryIndex,
+                    windowIndex: change.winIndex,
+                    delta: change.delta
+                )
+            case .rows:
+                handleRowWindowResize(
+                    in: layout,
+                    rowIndex: change.primaryIndex,
+                    windowIndex: change.winIndex,
+                    delta: change.delta
+                )
+            }
 
             layout.isApplyingLayout = true
             layout.framesSinceApply = 0
@@ -916,11 +1399,24 @@ class WindowManager: ObservableObject {
     }
 
     private func checkForClosedWindows(in layout: MonitorLayout) {
-        for (colIndex, column) in layout.columns.enumerated() {
-            for colWindow in column.windows {
-                if ExternalWindow.getFrame(from: colWindow.window.axElement) == nil {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.removeWindow(colWindow.id, fromColumn: colIndex, in: layout)
+        switch layout.layoutMode {
+        case .columns:
+            for (colIndex, column) in layout.columns.enumerated() {
+                for colWindow in column.windows {
+                    if ExternalWindow.getFrame(from: colWindow.window.axElement) == nil {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.removeWindow(colWindow.id, fromColumn: colIndex, in: layout)
+                        }
+                    }
+                }
+            }
+        case .rows:
+            for (rowIndex, row) in layout.rows.enumerated() {
+                for rowWindow in row.windows {
+                    if ExternalWindow.getFrame(from: rowWindow.window.axElement) == nil {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.removeWindow(rowWindow.id, fromRow: rowIndex, in: layout)
+                        }
                     }
                 }
             }
@@ -938,6 +1434,24 @@ class WindowManager: ObservableObject {
             let newProportion = 1.0 / CGFloat(count)
             for i in 0..<count {
                 layout.columns[columnIndex].windows[i].heightProportion = newProportion
+            }
+        }
+
+        refreshAvailableWindows()
+        objectWillChange.send()
+    }
+
+    private func removeWindow(_ windowId: UUID, fromRow rowIndex: Int, in layout: MonitorLayout) {
+        guard rowIndex < layout.rows.count else { return }
+
+        layout.rows[rowIndex].windows.removeAll { $0.id == windowId }
+
+        // Recalculate proportions
+        let count = layout.rows[rowIndex].windows.count
+        if count > 0 {
+            let newProportion = 1.0 / CGFloat(count)
+            for i in 0..<count {
+                layout.rows[rowIndex].windows[i].widthProportion = newProportion
             }
         }
 
@@ -1041,15 +1555,136 @@ class WindowManager: ObservableObject {
         normalizeWindowProportions(inColumn: columnIndex, in: layout)
     }
 
+    private func handleRowWindowResize(in layout: MonitorLayout, rowIndex: Int, windowIndex: Int, delta: FrameDelta) {
+        let threshold: CGFloat = 8
+
+        // Calculate size changes
+        let widthChange = delta.rightEdge - delta.leftEdge   // positive = got wider
+        let heightChange = delta.bottomEdge - delta.topEdge  // positive = got taller (in AX coords)
+
+        // VERTICAL: Determine which row edge was dragged (affects row heights)
+        if abs(heightChange) > threshold {
+            // Top edge dragged (bottom stayed relatively fixed)
+            if abs(delta.topEdge) > abs(delta.bottomEdge) && rowIndex > 0 {
+                let proportionalDelta = -delta.topEdge / layout.containerBounds.height
+                let newHeight = layout.rows[rowIndex].heightProportion + proportionalDelta
+                let neighborHeight = layout.rows[rowIndex - 1].heightProportion - proportionalDelta
+
+                if newHeight >= 0.1 && neighborHeight >= 0.1 {
+                    layout.rows[rowIndex].heightProportion = newHeight
+                    layout.rows[rowIndex - 1].heightProportion = neighborHeight
+                }
+            }
+            // Bottom edge dragged (top stayed relatively fixed)
+            else if abs(delta.bottomEdge) > abs(delta.topEdge) && rowIndex < layout.rows.count - 1 {
+                let proportionalDelta = delta.bottomEdge / layout.containerBounds.height
+                let newHeight = layout.rows[rowIndex].heightProportion + proportionalDelta
+                let neighborHeight = layout.rows[rowIndex + 1].heightProportion - proportionalDelta
+
+                if newHeight >= 0.1 && neighborHeight >= 0.1 {
+                    layout.rows[rowIndex].heightProportion = newHeight
+                    layout.rows[rowIndex + 1].heightProportion = neighborHeight
+                }
+            }
+        }
+
+        // HORIZONTAL: Determine which window edge was dragged (affects window widths within row)
+        if abs(widthChange) > threshold {
+            // Left edge dragged
+            if abs(delta.leftEdge) > abs(delta.rightEdge) && windowIndex > 0 {
+                let proportionalDelta = delta.leftEdge / layout.containerBounds.width
+                let newWidth = layout.rows[rowIndex].windows[windowIndex].widthProportion - proportionalDelta
+                let neighborWidth = layout.rows[rowIndex].windows[windowIndex - 1].widthProportion + proportionalDelta
+
+                if newWidth >= 0.1 && neighborWidth >= 0.1 {
+                    layout.rows[rowIndex].windows[windowIndex].widthProportion = newWidth
+                    layout.rows[rowIndex].windows[windowIndex - 1].widthProportion = neighborWidth
+                }
+            }
+            // Right edge dragged
+            else if abs(delta.rightEdge) > abs(delta.leftEdge) && windowIndex < layout.rows[rowIndex].windows.count - 1 {
+                let proportionalDelta = delta.rightEdge / layout.containerBounds.width
+                let newWidth = layout.rows[rowIndex].windows[windowIndex].widthProportion + proportionalDelta
+                let neighborWidth = layout.rows[rowIndex].windows[windowIndex + 1].widthProportion - proportionalDelta
+
+                if newWidth >= 0.1 && neighborWidth >= 0.1 {
+                    layout.rows[rowIndex].windows[windowIndex].widthProportion = newWidth
+                    layout.rows[rowIndex].windows[windowIndex + 1].widthProportion = neighborWidth
+                }
+            }
+        }
+
+        // Normalize proportions to prevent floating-point drift
+        normalizeRowProportions(in: layout)
+        normalizeWindowProportions(inRow: rowIndex, in: layout)
+    }
+
+    /// Layout-specific normalization for row heights
+    private func normalizeRowProportions(in layout: MonitorLayout) {
+        let total = layout.rows.reduce(0) { $0 + $1.heightProportion }
+        guard total > 0 && abs(total - 1.0) > 0.0001 else { return }
+        for i in 0..<layout.rows.count {
+            layout.rows[i].heightProportion /= total
+        }
+    }
+
+    /// Layout-specific normalization for window widths in a row
+    private func normalizeWindowProportions(inRow rowIndex: Int, in layout: MonitorLayout) {
+        guard rowIndex < layout.rows.count else { return }
+        let total = layout.rows[rowIndex].windows.reduce(0) { $0 + $1.widthProportion }
+        guard total > 0 && abs(total - 1.0) > 0.0001 else { return }
+        for i in 0..<layout.rows[rowIndex].windows.count {
+            layout.rows[rowIndex].windows[i].widthProportion /= total
+        }
+    }
+
     // MARK: - Helpers
 
-    /// Check if any column has windows
+    /// Check if any column/row has windows
     var hasAnyWindows: Bool {
-        columns.contains { !$0.windows.isEmpty }
+        switch layoutMode {
+        case .columns:
+            return columns.contains { !$0.windows.isEmpty }
+        case .rows:
+            return rows.contains { !$0.windows.isEmpty }
+        }
     }
 
     /// Total window count
     var totalWindowCount: Int {
-        columns.reduce(0) { $0 + $1.windows.count }
+        switch layoutMode {
+        case .columns:
+            return columns.reduce(0) { $0 + $1.windows.count }
+        case .rows:
+            return rows.reduce(0) { $0 + $1.windows.count }
+        }
+    }
+
+    /// Get evenly-spaced hue for an app name based on unique apps in current layout
+    func hueForApp(_ appName: String) -> Double {
+        // Get all unique app names in current layout, sorted for consistency
+        var allAppNames: [String] = []
+        switch layoutMode {
+        case .columns:
+            allAppNames = columns.flatMap { $0.windows.map { $0.window.ownerName } }
+        case .rows:
+            allAppNames = rows.flatMap { $0.windows.map { $0.window.ownerName } }
+        }
+        let uniqueApps = Array(Set(allAppNames)).sorted()
+
+        guard !uniqueApps.isEmpty else {
+            // Fallback to hash-based if no apps
+            return Double(abs(appName.hashValue) % 360) / 360.0
+        }
+
+        if let index = uniqueApps.firstIndex(of: appName) {
+            // Evenly space hues around the wheel
+            return Double(index) / Double(uniqueApps.count)
+        } else {
+            // App not in layout yet - use golden angle offset from last color
+            let goldenAngle = 0.618033988749895
+            let baseHue = Double(uniqueApps.count) / Double(max(uniqueApps.count, 1))
+            return (baseHue + goldenAngle).truncatingRemainder(dividingBy: 1.0)
+        }
     }
 }
