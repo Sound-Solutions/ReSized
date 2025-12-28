@@ -685,6 +685,12 @@ struct ColumnPreview: View {
                         )
                 )
             } else {
+                // Calculate available height for windows (container minus header ~24px and padding)
+                let availableHeight = max(100, containerSize.height - 40)
+                let dividerCount = CGFloat(column.windows.count - 1)
+                let totalDividerHeight = dividerCount * 6 // 6px per divider
+                let windowsHeight = availableHeight - totalDividerHeight
+
                 VStack(spacing: 0) {
                     ForEach(Array(column.windows.enumerated()), id: \.element.id) { winIndex, colWindow in
                         WindowTilePreview(
@@ -693,6 +699,7 @@ struct ColumnPreview: View {
                             windowIndex: winIndex,
                             heightProportion: colWindow.heightProportion
                         )
+                        .frame(height: max(40, windowsHeight * colWindow.heightProportion))
 
                         // Row divider (except after last window)
                         if winIndex < column.windows.count - 1 {
@@ -881,6 +888,12 @@ struct RowPreview: View {
                         )
                 )
             } else {
+                // Calculate available width for windows (container minus padding)
+                let availableWidth = max(100, containerSize.width - 40)
+                let dividerCount = CGFloat(row.windows.count - 1)
+                let totalDividerWidth = dividerCount * 6 // 6px per divider
+                let windowsWidth = availableWidth - totalDividerWidth
+
                 HStack(spacing: 0) {
                     ForEach(Array(row.windows.enumerated()), id: \.element.id) { winIndex, rowWindow in
                         RowWindowTilePreview(
@@ -889,6 +902,7 @@ struct RowPreview: View {
                             windowIndex: winIndex,
                             widthProportion: rowWindow.widthProportion
                         )
+                        .frame(width: max(40, windowsWidth * rowWindow.widthProportion))
 
                         // Window divider within row (except after last window)
                         if winIndex < row.windows.count - 1 {

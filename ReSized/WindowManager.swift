@@ -202,6 +202,10 @@ class WindowManager: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
 
+    /// Cache for app hue colors to avoid expensive recalculation on every render
+    private var hueCache: [String: Double] = [:]
+    private var hueCacheLayoutHash: Int = 0
+
     // MARK: - Computed Properties (proxy to current monitor's layout)
 
     var currentLayout: MonitorLayout? {
@@ -1472,12 +1476,14 @@ class WindowManager: ObservableObject {
                         windowHeight = colWindow.heightProportion * layout.containerBounds.height
                     }
 
-                    let expectedFrame = CGRect(
+                    var expectedFrame = CGRect(
                         x: currentX,
                         y: currentTop - windowHeight,
                         width: columnWidth,
                         height: windowHeight
                     )
+                    // Constrain expected frame to window's min/max size to avoid perpetual sync
+                    expectedFrame = constrainFrame(expectedFrame, for: colWindow.window)
                     layout.expectedFrames[colWindow.id] = expectedFrame
                     currentTop -= windowHeight
                 }
@@ -1511,12 +1517,14 @@ class WindowManager: ObservableObject {
                         windowWidth = rowWindow.widthProportion * layout.containerBounds.width
                     }
 
-                    let expectedFrame = CGRect(
+                    var expectedFrame = CGRect(
                         x: currentX,
                         y: currentTop - rowHeight,
                         width: windowWidth,
                         height: rowHeight
                     )
+                    // Constrain expected frame to window's min/max size to avoid perpetual sync
+                    expectedFrame = constrainFrame(expectedFrame, for: rowWindow.window)
                     layout.expectedFrames[rowWindow.id] = expectedFrame
                     currentX += windowWidth
                 }
@@ -1532,7 +1540,11 @@ class WindowManager: ObservableObject {
         layout.framesSinceApply += 1
         guard layout.framesSinceApply > 2 else { return }
 
-        // Check for closed windows (about once per second at 60fps)
+        // Throttle sync checks to ~15fps instead of 60fps to reduce AX API calls
+        // With 9 windows at 60fps = 540 API calls/sec, at 15fps = 135 calls/sec
+        guard layout.framesSinceApply % 4 == 0 else { return }
+
+        // Check for closed windows (about once per second)
         if layout.framesSinceApply % 60 == 0 {
             checkForClosedWindows(in: layout)
         }
@@ -1878,8 +1890,9 @@ class WindowManager: ObservableObject {
     }
 
     /// Get evenly-spaced hue for an app name based on unique apps in current layout
+    /// Uses caching to avoid expensive recalculation on every render
     func hueForApp(_ appName: String) -> Double {
-        // Get all unique app names in current layout, sorted for consistency
+        // Get all unique app names in current layout
         var allAppNames: [String] = []
         switch layoutMode {
         case .columns:
@@ -1887,21 +1900,39 @@ class WindowManager: ObservableObject {
         case .rows:
             allAppNames = rows.flatMap { $0.windows.map { $0.window.ownerName } }
         }
-        let uniqueApps = Array(Set(allAppNames)).sorted()
 
-        guard !uniqueApps.isEmpty else {
-            // Fallback to hash-based if no apps
-            return Double(abs(appName.hashValue) % 360) / 360.0
+        // Check if cache is still valid (layout hasn't changed)
+        let currentHash = allAppNames.sorted().hashValue
+        if currentHash != hueCacheLayoutHash {
+            // Layout changed, invalidate cache
+            hueCache.removeAll()
+            hueCacheLayoutHash = currentHash
         }
 
-        if let index = uniqueApps.firstIndex(of: appName) {
+        // Return cached value if available
+        if let cached = hueCache[appName] {
+            return cached
+        }
+
+        // Calculate hue
+        let uniqueApps = Array(Set(allAppNames)).sorted()
+        let hue: Double
+
+        if uniqueApps.isEmpty {
+            // Fallback to hash-based if no apps
+            hue = Double(abs(appName.hashValue) % 360) / 360.0
+        } else if let index = uniqueApps.firstIndex(of: appName) {
             // Evenly space hues around the wheel
-            return Double(index) / Double(uniqueApps.count)
+            hue = Double(index) / Double(uniqueApps.count)
         } else {
             // App not in layout yet - use golden angle offset from last color
             let goldenAngle = 0.618033988749895
             let baseHue = Double(uniqueApps.count) / Double(max(uniqueApps.count, 1))
-            return (baseHue + goldenAngle).truncatingRemainder(dividingBy: 1.0)
+            hue = (baseHue + goldenAngle).truncatingRemainder(dividingBy: 1.0)
         }
+
+        // Cache and return
+        hueCache[appName] = hue
+        return hue
     }
 }
