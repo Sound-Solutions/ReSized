@@ -1,4 +1,19 @@
 import SwiftUI
+import UniformTypeIdentifiers
+
+// MARK: - Drag and Drop Data
+
+struct WindowDragData: Codable, Transferable {
+    let windowId: UUID
+    let sourceColumn: Int?  // nil if from sidebar
+    let sourceRow: Int?     // nil if from sidebar (rows mode)
+    let sourceIndex: Int?   // position within column/row
+    let externalWindowId: UUID?  // For sidebar items, the ExternalWindow.id
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .json)
+    }
+}
 
 struct ContentView: View {
     @EnvironmentObject var windowManager: WindowManager
@@ -648,6 +663,7 @@ struct ColumnPreview: View {
     let onRemove: () -> Void
     let totalColumns: Int
     @EnvironmentObject var windowManager: WindowManager
+    @State private var isDropTarget = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -728,6 +744,18 @@ struct ColumnPreview: View {
             }
         }
         .frame(width: max(60, ((containerSize.width - 32) - CGFloat(totalColumns - 1) * 8) * column.widthProportion))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.accentColor, lineWidth: 3)
+                .opacity(isDropTarget ? 1 : 0)
+        )
+        .dropDestination(for: WindowDragData.self) { items, location in
+            guard let dragData = items.first else { return false }
+            windowManager.handleColumnDrop(dragData: dragData, targetColumn: columnIndex)
+            return true
+        } isTargeted: { isTargeted in
+            isDropTarget = isTargeted
+        }
     }
 }
 
@@ -765,6 +793,13 @@ struct WindowTilePreview: View {
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(colorForApp(columnWindow.window.ownerName))
+        .draggable(WindowDragData(
+            windowId: columnWindow.id,
+            sourceColumn: columnIndex,
+            sourceRow: nil,
+            sourceIndex: windowIndex,
+            externalWindowId: nil
+        ))
     }
 
     private func colorForApp(_ name: String) -> Color {
@@ -849,6 +884,7 @@ struct RowPreview: View {
     let onRemove: () -> Void
     let totalRows: Int
     @EnvironmentObject var windowManager: WindowManager
+    @State private var isDropTarget = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -931,6 +967,18 @@ struct RowPreview: View {
             }
         }
         .frame(height: max(60, ((containerSize.height - 32) - CGFloat(totalRows - 1) * 8) * row.heightProportion))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.accentColor, lineWidth: 3)
+                .opacity(isDropTarget ? 1 : 0)
+        )
+        .dropDestination(for: WindowDragData.self) { items, location in
+            guard let dragData = items.first else { return false }
+            windowManager.handleRowDrop(dragData: dragData, targetRow: rowIndex)
+            return true
+        } isTargeted: { isTargeted in
+            isDropTarget = isTargeted
+        }
     }
 }
 
@@ -968,6 +1016,13 @@ struct RowWindowTilePreview: View {
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(colorForApp(rowWindow.window.ownerName))
+        .draggable(WindowDragData(
+            windowId: rowWindow.id,
+            sourceColumn: nil,
+            sourceRow: rowIndex,
+            sourceIndex: windowIndex,
+            externalWindowId: nil
+        ))
     }
 
     private func colorForApp(_ name: String) -> Color {
@@ -1133,6 +1188,13 @@ struct AvailableWindowRow: View {
                 RoundedRectangle(cornerRadius: 8)
                     .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
             )
+            .draggable(WindowDragData(
+                windowId: UUID(),  // Placeholder, not used for sidebar
+                sourceColumn: nil,
+                sourceRow: nil,
+                sourceIndex: nil,
+                externalWindowId: window.id
+            ))
         }
         .buttonStyle(.plain)
     }

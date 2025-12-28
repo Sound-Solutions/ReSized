@@ -914,6 +914,62 @@ class WindowManager: ObservableObject {
         addWindow(window, toColumn: toColumn)
     }
 
+    // MARK: - Drag and Drop Handlers
+
+    /// Handle dropping a window onto a column
+    func handleColumnDrop(dragData: WindowDragData, targetColumn: Int) {
+        guard targetColumn < columns.count else { return }
+
+        // Case 1: Dragging from sidebar (externalWindowId is set)
+        if let externalWindowId = dragData.externalWindowId {
+            // Find the window in availableWindows
+            if let window = availableWindows.first(where: { $0.id == externalWindowId }) {
+                addWindow(window, toColumn: targetColumn)
+            }
+            return
+        }
+
+        // Case 2: Dragging from another column
+        if let sourceColumn = dragData.sourceColumn {
+            // Don't do anything if dropping on same column (reordering within column not yet implemented)
+            if sourceColumn == targetColumn { return }
+
+            // Find the window and move it
+            if let windowIndex = columns[sourceColumn].windows.firstIndex(where: { $0.id == dragData.windowId }) {
+                let window = columns[sourceColumn].windows[windowIndex].window
+                removeWindow(dragData.windowId, fromColumn: sourceColumn)
+                addWindow(window, toColumn: targetColumn)
+            }
+        }
+    }
+
+    /// Handle dropping a window onto a row
+    func handleRowDrop(dragData: WindowDragData, targetRow: Int) {
+        guard targetRow < rows.count else { return }
+
+        // Case 1: Dragging from sidebar (externalWindowId is set)
+        if let externalWindowId = dragData.externalWindowId {
+            // Find the window in availableWindows
+            if let window = availableWindows.first(where: { $0.id == externalWindowId }) {
+                addWindow(window, toRow: targetRow)
+            }
+            return
+        }
+
+        // Case 2: Dragging from another row
+        if let sourceRow = dragData.sourceRow {
+            // Don't do anything if dropping on same row (reordering within row not yet implemented)
+            if sourceRow == targetRow { return }
+
+            // Find the window and move it
+            if let windowIndex = rows[sourceRow].windows.firstIndex(where: { $0.id == dragData.windowId }) {
+                let window = rows[sourceRow].windows[windowIndex].window
+                removeWindow(dragData.windowId, fromRow: sourceRow)
+                addWindow(window, toRow: targetRow)
+            }
+        }
+    }
+
     /// Add a new empty column
     func addColumn() {
         // Recalculate proportions to make room for new column
