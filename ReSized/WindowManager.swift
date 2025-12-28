@@ -855,7 +855,7 @@ class WindowManager: ObservableObject {
     // MARK: - Column Management
 
     /// Add a window to a specific column
-    func addWindow(_ window: ExternalWindow, toColumn columnIndex: Int) {
+    func addWindow(_ window: ExternalWindow, toColumn columnIndex: Int, atIndex: Int = -1) {
         guard columnIndex < columns.count else { return }
 
         // Calculate new equal proportions for all windows in this column
@@ -873,7 +873,13 @@ class WindowManager: ObservableObject {
             window: window,
             heightProportion: newProportion
         )
-        columns[columnIndex].windows.append(columnWindow)
+
+        // Insert at specified index or append
+        if atIndex >= 0 && atIndex < columns[columnIndex].windows.count {
+            columns[columnIndex].windows.insert(columnWindow, at: atIndex)
+        } else {
+            columns[columnIndex].windows.append(columnWindow)
+        }
 
         refreshAvailableWindows()
 
@@ -917,56 +923,98 @@ class WindowManager: ObservableObject {
     // MARK: - Drag and Drop Handlers
 
     /// Handle dropping a window onto a column
-    func handleColumnDrop(dragData: WindowDragData, targetColumn: Int) {
+    func handleColumnDrop(dragData: WindowDragData, targetColumn: Int, atIndex: Int = -1) {
         guard targetColumn < columns.count else { return }
 
         // Case 1: Dragging from sidebar (externalWindowId is set)
         if let externalWindowId = dragData.externalWindowId {
             // Find the window in availableWindows
             if let window = availableWindows.first(where: { $0.id == externalWindowId }) {
-                addWindow(window, toColumn: targetColumn)
+                addWindow(window, toColumn: targetColumn, atIndex: atIndex)
             }
             return
         }
 
-        // Case 2: Dragging from another column
-        if let sourceColumn = dragData.sourceColumn {
-            // Don't do anything if dropping on same column (reordering within column not yet implemented)
-            if sourceColumn == targetColumn { return }
+        // Case 2: Dragging within same column (reordering)
+        if let sourceColumn = dragData.sourceColumn, sourceColumn == targetColumn {
+            if let sourceIndex = dragData.sourceIndex {
+                reorderWindowInColumn(columnIndex: sourceColumn, fromIndex: sourceIndex, toIndex: atIndex)
+            }
+            return
+        }
 
+        // Case 3: Dragging from another column
+        if let sourceColumn = dragData.sourceColumn {
             // Find the window and move it
             if let windowIndex = columns[sourceColumn].windows.firstIndex(where: { $0.id == dragData.windowId }) {
                 let window = columns[sourceColumn].windows[windowIndex].window
                 removeWindow(dragData.windowId, fromColumn: sourceColumn)
-                addWindow(window, toColumn: targetColumn)
+                addWindow(window, toColumn: targetColumn, atIndex: atIndex)
             }
         }
     }
 
+    /// Reorder a window within a column
+    func reorderWindowInColumn(columnIndex: Int, fromIndex: Int, toIndex: Int) {
+        guard columnIndex < columns.count else { return }
+        guard fromIndex < columns[columnIndex].windows.count else { return }
+        guard fromIndex != toIndex else { return }
+
+        let window = columns[columnIndex].windows.remove(at: fromIndex)
+        let adjustedToIndex = toIndex > fromIndex ? toIndex - 1 : toIndex
+        let insertIndex = min(adjustedToIndex, columns[columnIndex].windows.count)
+        columns[columnIndex].windows.insert(window, at: max(0, insertIndex))
+
+        if isActive {
+            applyLayout()
+        }
+    }
+
     /// Handle dropping a window onto a row
-    func handleRowDrop(dragData: WindowDragData, targetRow: Int) {
+    func handleRowDrop(dragData: WindowDragData, targetRow: Int, atIndex: Int = -1) {
         guard targetRow < rows.count else { return }
 
         // Case 1: Dragging from sidebar (externalWindowId is set)
         if let externalWindowId = dragData.externalWindowId {
             // Find the window in availableWindows
             if let window = availableWindows.first(where: { $0.id == externalWindowId }) {
-                addWindow(window, toRow: targetRow)
+                addWindow(window, toRow: targetRow, atIndex: atIndex)
             }
             return
         }
 
-        // Case 2: Dragging from another row
-        if let sourceRow = dragData.sourceRow {
-            // Don't do anything if dropping on same row (reordering within row not yet implemented)
-            if sourceRow == targetRow { return }
+        // Case 2: Dragging within same row (reordering)
+        if let sourceRow = dragData.sourceRow, sourceRow == targetRow {
+            if let sourceIndex = dragData.sourceIndex {
+                reorderWindowInRow(rowIndex: sourceRow, fromIndex: sourceIndex, toIndex: atIndex)
+            }
+            return
+        }
 
+        // Case 3: Dragging from another row
+        if let sourceRow = dragData.sourceRow {
             // Find the window and move it
             if let windowIndex = rows[sourceRow].windows.firstIndex(where: { $0.id == dragData.windowId }) {
                 let window = rows[sourceRow].windows[windowIndex].window
                 removeWindow(dragData.windowId, fromRow: sourceRow)
-                addWindow(window, toRow: targetRow)
+                addWindow(window, toRow: targetRow, atIndex: atIndex)
             }
+        }
+    }
+
+    /// Reorder a window within a row
+    func reorderWindowInRow(rowIndex: Int, fromIndex: Int, toIndex: Int) {
+        guard rowIndex < rows.count else { return }
+        guard fromIndex < rows[rowIndex].windows.count else { return }
+        guard fromIndex != toIndex else { return }
+
+        let window = rows[rowIndex].windows.remove(at: fromIndex)
+        let adjustedToIndex = toIndex > fromIndex ? toIndex - 1 : toIndex
+        let insertIndex = min(adjustedToIndex, rows[rowIndex].windows.count)
+        rows[rowIndex].windows.insert(window, at: max(0, insertIndex))
+
+        if isActive {
+            applyLayout()
         }
     }
 
@@ -1002,7 +1050,7 @@ class WindowManager: ObservableObject {
     // MARK: - Row Management
 
     /// Add a window to a specific row
-    func addWindow(_ window: ExternalWindow, toRow rowIndex: Int) {
+    func addWindow(_ window: ExternalWindow, toRow rowIndex: Int, atIndex: Int = -1) {
         guard rowIndex < rows.count else { return }
 
         // Calculate new equal proportions for all windows in this row
@@ -1020,7 +1068,13 @@ class WindowManager: ObservableObject {
             window: window,
             widthProportion: newProportion
         )
-        rows[rowIndex].windows.append(rowWindow)
+
+        // Insert at specified index or append
+        if atIndex >= 0 && atIndex < rows[rowIndex].windows.count {
+            rows[rowIndex].windows.insert(rowWindow, at: atIndex)
+        } else {
+            rows[rowIndex].windows.append(rowWindow)
+        }
 
         refreshAvailableWindows()
 

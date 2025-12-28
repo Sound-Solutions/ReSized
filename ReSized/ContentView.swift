@@ -751,11 +751,23 @@ struct ColumnPreview: View {
         )
         .dropDestination(for: WindowDragData.self) { items, location in
             guard let dragData = items.first else { return false }
-            windowManager.handleColumnDrop(dragData: dragData, targetColumn: columnIndex)
+            // Calculate drop index based on Y position
+            let dropIndex = calculateDropIndex(at: location.y, windowCount: column.windows.count)
+            windowManager.handleColumnDrop(dragData: dragData, targetColumn: columnIndex, atIndex: dropIndex)
             return true
         } isTargeted: { isTargeted in
             isDropTarget = isTargeted
         }
+    }
+
+    private func calculateDropIndex(at yPosition: CGFloat, windowCount: Int) -> Int {
+        guard windowCount > 0 else { return 0 }
+        // Estimate position based on equal distribution (header is ~32px)
+        let contentHeight = containerSize.height - 40
+        let windowHeight = contentHeight / CGFloat(windowCount)
+        let adjustedY = yPosition - 32 // Account for header
+        let index = Int(adjustedY / windowHeight)
+        return max(0, min(index, windowCount))
     }
 }
 
@@ -974,11 +986,22 @@ struct RowPreview: View {
         )
         .dropDestination(for: WindowDragData.self) { items, location in
             guard let dragData = items.first else { return false }
-            windowManager.handleRowDrop(dragData: dragData, targetRow: rowIndex)
+            // Calculate drop index based on X position
+            let dropIndex = calculateDropIndex(at: location.x, windowCount: row.windows.count)
+            windowManager.handleRowDrop(dragData: dragData, targetRow: rowIndex, atIndex: dropIndex)
             return true
         } isTargeted: { isTargeted in
             isDropTarget = isTargeted
         }
+    }
+
+    private func calculateDropIndex(at xPosition: CGFloat, windowCount: Int) -> Int {
+        guard windowCount > 0 else { return 0 }
+        // Estimate position based on equal distribution
+        let contentWidth = containerSize.width - 40
+        let windowWidth = contentWidth / CGFloat(windowCount)
+        let index = Int(xPosition / windowWidth)
+        return max(0, min(index, windowCount))
     }
 }
 
