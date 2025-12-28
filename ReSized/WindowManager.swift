@@ -2591,38 +2591,19 @@ class WindowManager: ObservableObject {
     /// Handle monitor preset LOAD hotkey (⌘⇧1-9): Loads preset for monitor where mouse is
     func handleMonitorPresetLoad(slot: Int) {
         // Use the monitor where the mouse cursor is located
-        let mouseLocation = NSEvent.mouseLocation
-        NSLog("🖱️ Mouse at: %@", String(describing: mouseLocation))
-        NSLog("📺 Available monitors: %@", availableMonitors.map { "\($0.name): \($0.id) frame=\($0.frame)" }.joined(separator: ", "))
-
         guard let monitor = getMonitorAtMouseLocation() ?? availableMonitors.first else {
-            NSLog("❌ No monitor found!")
             return
         }
 
-        NSLog("🎯 Detected monitor: %@ (id=%@)", monitor.name, monitor.id)
-        NSLog("📦 Looking for preset slot %d on monitor %@", slot, monitor.id)
-
-        let allPresets = loadMonitorPresetsList()
-        NSLog("📦 All presets: %@", allPresets.map { "slot=\($0.presetSlot ?? -1), monitor=\($0.monitorId ?? "nil")" }.joined(separator: ", "))
-
-        let existing = getMonitorPreset(slot: slot, monitorId: monitor.id)
-        NSLog("📋 Preset exists: %@", existing != nil ? "yes" : "no")
-        NSLog("📋 Layout exists for monitor: %@", monitorLayouts[monitor.id] != nil ? "yes" : "no")
-
         // Create layout for this monitor if it doesn't exist
         if monitorLayouts[monitor.id] == nil {
-            NSLog("🔧 Creating layout for monitor %@", monitor.id)
             monitorLayouts[monitor.id] = MonitorLayout(monitor: monitor)
         }
 
-        if let existing = existing,
+        if let existing = getMonitorPreset(slot: slot, monitorId: monitor.id),
            let layout = monitorLayouts[monitor.id] {
-            NSLog("✅ Found preset, loading...")
             loadLayoutIntoMonitor(saved: existing, layout: layout)
             startManaging(layout: layout)  // Use specific layout, not currentLayout
-        } else {
-            NSLog("❌ No preset found for slot %d on monitor %@", slot, monitor.id)
         }
     }
 

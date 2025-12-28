@@ -148,13 +148,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static func handleHotKey(id: UInt32) {
-        NSLog("🔥 Hotkey pressed: id=%d", id)
         let wm = WindowManager.shared
 
         switch id {
         case 1:
             // Toggle start/stop
-            NSLog("  -> Toggle start/stop")
             if wm.hasAnyActiveLayout {
                 wm.stopAllLayouts()
             } else {
@@ -164,17 +162,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case 10...18:
             // Load monitor preset for focused window's monitor (Cmd+Shift+1-9)
             let slot = Int(id) - 9  // Convert ID 10-18 to slot 1-9
-            NSLog("  -> Load monitor preset slot %d", slot)
             wm.handleMonitorPresetLoad(slot: slot)
 
         case 20...28:
             // Load workspace preset - all monitors (Cmd+Option+Shift+1-9)
             let slot = Int(id) - 19  // Convert ID 20-28 to slot 1-9
-            NSLog("  -> Load workspace preset slot %d", slot)
             wm.loadWorkspacePresetBySlot(slot: slot)
 
         default:
-            NSLog("  -> Unknown hotkey id")
             break
         }
     }
