@@ -234,12 +234,16 @@ class WindowManager: ObservableObject {
 
         let allWindows = WindowDiscovery.discoverAllWindows()
 
+        // Convert monitor frame to AX coordinates for comparison
+        // Monitor frame is in NSScreen coords (Y=0 at bottom)
+        // Window frames are in AX coords (Y=0 at top)
+        let monitorFrameAX = convertFrameToAXCoordinates(monitor.frame)
+
         // Filter to windows that overlap with this monitor
-        let monitorFrame = monitor.frame
         let windowsOnMonitor = allWindows.filter { window in
-            let frame = window.frame
+            let frame = window.frame  // Already in AX coordinates
             // Check if window overlaps with monitor (at least 50% on this monitor)
-            let intersection = frame.intersection(monitorFrame)
+            let intersection = frame.intersection(monitorFrameAX)
             let overlapArea = intersection.width * intersection.height
             let windowArea = frame.width * frame.height
             return windowArea > 0 && overlapArea / windowArea > 0.5
@@ -267,20 +271,20 @@ class WindowManager: ObservableObject {
         }
 
         // Build columns with proportions
-        let totalWidth = monitorFrame.width
+        let totalWidth = monitor.frame.width
         var newColumns: [Column] = []
 
         for group in columnGroups {
-            // Sort windows in column by Y (top to bottom in screen coords)
-            // Note: higher Y = higher on screen in NSScreen coords
-            let sortedByY = group.sorted { $0.frame.maxY > $1.frame.maxY }
+            // Sort windows in column by Y (top to bottom)
+            // In AX coords: Y=0 at top, so lower minY = higher on screen
+            let sortedByY = group.sorted { $0.frame.minY < $1.frame.minY }
 
             // Calculate column width from first window (they should all be similar)
             let columnWidth = group.first?.frame.width ?? totalWidth / CGFloat(columnGroups.count)
             let widthProportion = columnWidth / totalWidth
 
             // Build windows with height proportions
-            let totalHeight = monitorFrame.height
+            let totalHeight = monitor.frame.height
             var columnWindows: [ColumnWindow] = []
 
             for window in sortedByY {
