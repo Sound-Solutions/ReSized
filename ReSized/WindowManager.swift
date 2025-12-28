@@ -1370,6 +1370,9 @@ class WindowManager: ObservableObject {
 
         // Create display link synced to this monitor's refresh rate
         setupDisplayLink(for: layout)
+
+        // Notify menu bar
+        NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
     }
 
     private func setupDisplayLink(for layout: MonitorLayout) {
@@ -1439,6 +1442,100 @@ class WindowManager: ObservableObject {
         // Show highlight again when not actively managing
         if let monitor = selectedMonitor {
             MonitorHighlightWindow.show(on: monitor.screen)
+        }
+
+        // Notify menu bar
+        NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
+    }
+
+    // MARK: - Global Start/Stop (for menu bar)
+
+    /// Check if any monitor has an active layout
+    var hasAnyActiveLayout: Bool {
+        monitorLayouts.values.contains { $0.isActive }
+    }
+
+    /// Start managing all configured monitors
+    func startAllLayouts() {
+        for (monitorId, layout) in monitorLayouts {
+            // Only start if layout has windows configured
+            let hasWindows = !layout.columns.isEmpty || !layout.rows.isEmpty
+            guard hasWindows else { continue }
+
+            layout.isActive = true
+            layout.appState = .active
+
+            // Apply initial layout and store expected frames
+            applyLayoutForMonitor(layout)
+            applyLayoutAndUpdateExpected(for: layout)
+
+            // Create display link
+            setupDisplayLink(for: layout)
+        }
+        objectWillChange.send()
+        NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
+    }
+
+    /// Stop managing all monitors
+    func stopAllLayouts() {
+        for layout in monitorLayouts.values where layout.isActive {
+            layout.isActive = false
+            layout.appState = .configuring
+
+            if let link = layout.displayLink {
+                CVDisplayLinkStop(link)
+                layout.displayLink = nil
+            }
+            layout.expectedFrames.removeAll()
+        }
+        MonitorHighlightWindow.hide()
+        objectWillChange.send()
+        NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
+    }
+
+    /// Apply layout for a specific monitor (used by startAllLayouts)
+    private func applyLayoutForMonitor(_ layout: MonitorLayout) {
+        let bounds = layout.containerBounds
+        guard bounds.width > 0 && bounds.height > 0 else { return }
+
+        switch layout.layoutMode {
+        case .columns:
+            var currentX = bounds.minX
+            for (colIndex, column) in layout.columns.enumerated() {
+                let isLastColumn = (colIndex == layout.columns.count - 1)
+                let columnWidth = isLastColumn ? (bounds.maxX - currentX) : (column.widthProportion * bounds.width)
+
+                var currentTop = bounds.maxY
+                for (winIndex, colWindow) in column.windows.enumerated() {
+                    let isLastWindow = (winIndex == column.windows.count - 1)
+                    let windowHeight = isLastWindow ? (currentTop - bounds.minY) : (colWindow.heightProportion * bounds.height)
+
+                    let frame = CGRect(x: currentX, y: currentTop - windowHeight, width: columnWidth, height: windowHeight)
+                    let constrained = constrainFrame(frame, for: colWindow.window)
+                    _ = colWindow.window.setFrame(constrained)
+                    currentTop -= windowHeight
+                }
+                currentX += columnWidth
+            }
+
+        case .rows:
+            var currentTop = bounds.maxY
+            for (rowIndex, row) in layout.rows.enumerated() {
+                let isLastRow = (rowIndex == layout.rows.count - 1)
+                let rowHeight = isLastRow ? (currentTop - bounds.minY) : (row.heightProportion * bounds.height)
+
+                var currentX = bounds.minX
+                for (winIndex, rowWindow) in row.windows.enumerated() {
+                    let isLastWindow = (winIndex == row.windows.count - 1)
+                    let windowWidth = isLastWindow ? (bounds.maxX - currentX) : (rowWindow.widthProportion * bounds.width)
+
+                    let frame = CGRect(x: currentX, y: currentTop - rowHeight, width: windowWidth, height: rowHeight)
+                    let constrained = constrainFrame(frame, for: rowWindow.window)
+                    _ = rowWindow.window.setFrame(constrained)
+                    currentX += windowWidth
+                }
+                currentTop -= rowHeight
+            }
         }
     }
 
