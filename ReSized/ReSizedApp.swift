@@ -245,11 +245,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
-        // Open the SwiftUI Settings window
-        if #available(macOS 14.0, *) {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        } else {
-            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+
+        // Simulate Cmd+, keyboard shortcut to open Settings
+        let source = CGEventSource(stateID: .hidSystemState)
+
+        // Key down: comma with command modifier
+        if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x2B, keyDown: true) {
+            keyDown.flags = .maskCommand
+            keyDown.post(tap: .cghidEventTap)
+        }
+
+        // Key up
+        if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x2B, keyDown: false) {
+            keyUp.flags = .maskCommand
+            keyUp.post(tap: .cghidEventTap)
         }
     }
 
