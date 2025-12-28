@@ -1130,6 +1130,7 @@ struct RowWindowDividerHandle: View {
 struct WindowPickerSidebar: View {
     @EnvironmentObject var windowManager: WindowManager
     @Binding var selectedIndex: Int
+    @State private var showingAppPicker = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1173,8 +1174,107 @@ struct WindowPickerSidebar: View {
                 }
             }
 
+            Divider()
+
+            // Add placeholder app button
+            Button {
+                showingAppPicker = true
+            } label: {
+                HStack {
+                    Image(systemName: "plus.app")
+                    Text("Add App (Not Open)")
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderless)
+            .padding()
         }
         .background(Color(nsColor: .controlBackgroundColor))
+        .sheet(isPresented: $showingAppPicker) {
+            PlaceholderAppPicker(targetIndex: selectedIndex)
+                .environmentObject(windowManager)
+        }
+    }
+}
+
+struct PlaceholderAppPicker: View {
+    @EnvironmentObject var windowManager: WindowManager
+    @Environment(\.dismiss) var dismiss
+    let targetIndex: Int
+
+    @State private var searchText = ""
+    @State private var installedApps: [(name: String, bundleId: String, path: String)] = []
+
+    var filteredApps: [(name: String, bundleId: String, path: String)] {
+        if searchText.isEmpty {
+            return installedApps
+        }
+        return installedApps.filter {
+            $0.name.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Add Placeholder App")
+                    .font(.headline)
+                Spacer()
+                Button("Cancel") { dismiss() }
+            }
+            .padding()
+
+            TextField("Search apps...", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal)
+
+            Divider()
+                .padding(.top, 8)
+
+            List(filteredApps, id: \.bundleId) { app in
+                Button {
+                    addPlaceholderApp(app)
+                    dismiss()
+                } label: {
+                    HStack {
+                        if let icon = NSWorkspace.shared.icon(forFile: app.path) as NSImage? {
+                            Image(nsImage: icon)
+                                .resizable()
+                                .frame(width: 24, height: 24)
+                        }
+                        Text(app.name)
+                        Spacer()
+                        Image(systemName: "plus.circle")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            .listStyle(.plain)
+        }
+        .frame(width: 320, height: 400)
+        .onAppear {
+            installedApps = AppLauncher.getInstalledApps()
+        }
+    }
+
+    private func addPlaceholderApp(_ app: (name: String, bundleId: String, path: String)) {
+        // Launch the app first
+        AppLauncher.launchApp(bundleId: app.bundleId)
+
+        // Wait a bit for the window to appear, then refresh and add
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            windowManager.refreshAvailableWindows()
+
+            // Try to find and add the window
+            if let window = windowManager.availableWindows.first(where: { $0.ownerName == app.name }) {
+                if windowManager.layoutMode == .columns {
+                    windowManager.addWindow(window, toColumn: targetIndex)
+                } else {
+                    windowManager.addWindow(window, toRow: targetIndex)
+                }
+            }
+        }
     }
 }
 

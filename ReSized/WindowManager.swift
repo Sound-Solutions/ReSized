@@ -2518,6 +2518,8 @@ class WindowManager: ObservableObject {
     func loadMonitorPreset(_ preset: SavedLayout) {
         guard let layout = currentLayout else { return }
         loadLayoutIntoMonitor(saved: preset, layout: layout)
+        // Auto-start managing after loading a preset via hotkey
+        startManaging()
     }
 
     func deleteMonitorPreset(slot: Int, monitorId: String) {
