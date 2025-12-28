@@ -552,7 +552,7 @@ class WindowManager: ObservableObject {
                 }
 
                 // Window origin is bottom-left, so y = top - height
-                let frame = CGRect(
+                var frame = CGRect(
                     x: currentX,
                     y: currentTop - windowHeight,
                     width: columnWidth,
@@ -560,8 +560,19 @@ class WindowManager: ObservableObject {
                 )
 
                 // Respect window's min/max size constraints
-                let constrained = constrainFrame(frame, for: columnWindow.window)
-                _ = columnWindow.window.setFrame(constrained)
+                frame = constrainFrame(frame, for: columnWindow.window)
+
+                // For last column, keep right edge aligned (adjust x if width was constrained)
+                if isLastColumn && frame.width < columnWidth {
+                    frame.origin.x = rightEdge - frame.width
+                }
+
+                // For last window, keep bottom edge aligned (adjust y if height was constrained)
+                if isLastWindow && frame.height < windowHeight {
+                    frame.origin.y = bottomEdge
+                }
+
+                _ = columnWindow.window.setFrame(frame)
 
                 // Move down for next window
                 currentTop -= windowHeight
