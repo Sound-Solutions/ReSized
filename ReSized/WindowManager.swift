@@ -418,6 +418,168 @@ class WindowManager: ObservableObject {
         refreshAvailableWindows()
     }
 
+    // MARK: - Tiled Window Detection
+
+    private let edgeTolerance: CGFloat = 20  // Tolerance for edge matching
+
+    /// Check if two values are approximately equal within tolerance
+    private func isClose(_ a: CGFloat, _ b: CGFloat, tolerance: CGFloat = 20) -> Bool {
+        abs(a - b) <= tolerance
+    }
+
+    /// Determine which edges a window touches (monitor edges or other window edges)
+    private func detectTouchedEdges(
+        window: ExternalWindow,
+        allWindows: [ExternalWindow],
+        monitorFrame: CGRect
+    ) -> (left: Bool, right: Bool, top: Bool, bottom: Bool) {
+        let frame = window.frame
+
+        // Check if touching monitor edges
+        var touchesLeft = frame.minX <= monitorFrame.minX + edgeTolerance
+        var touchesRight = frame.maxX >= monitorFrame.maxX - edgeTolerance
+        var touchesTop = frame.minY <= monitorFrame.minY + edgeTolerance
+        var touchesBottom = frame.maxY >= monitorFrame.maxY - edgeTolerance
+
+        // Check if touching other windows
+        for other in allWindows where other.id != window.id {
+            let otherFrame = other.frame
+
+            // Check horizontal adjacency (windows must overlap vertically to be neighbors)
+            let verticalOverlap = frame.minY < otherFrame.maxY && frame.maxY > otherFrame.minY
+            if verticalOverlap {
+                // Window's right edge touches other's left edge
+                if isClose(frame.maxX, otherFrame.minX, tolerance: edgeTolerance) {
+                    touchesRight = true
+                }
+                // Window's left edge touches other's right edge
+                if isClose(frame.minX, otherFrame.maxX, tolerance: edgeTolerance) {
+                    touchesLeft = true
+                }
+            }
+
+            // Check vertical adjacency (windows must overlap horizontally to be neighbors)
+            let horizontalOverlap = frame.minX < otherFrame.maxX && frame.maxX > otherFrame.minX
+            if horizontalOverlap {
+                // Window's bottom edge touches other's top edge
+                if isClose(frame.maxY, otherFrame.minY, tolerance: edgeTolerance) {
+                    touchesBottom = true
+                }
+                // Window's top edge touches other's bottom edge
+                if isClose(frame.minY, otherFrame.maxY, tolerance: edgeTolerance) {
+                    touchesTop = true
+                }
+            }
+        }
+
+        return (touchesLeft, touchesRight, touchesTop, touchesBottom)
+    }
+
+    /// Check if a window is part of a tiled layout (not floating)
+    private func isTiledWindow(
+        window: ExternalWindow,
+        allWindows: [ExternalWindow],
+        monitorFrame: CGRect
+    ) -> Bool {
+        let edges = detectTouchedEdges(window: window, allWindows: allWindows, monitorFrame: monitorFrame)
+
+        // Count how many edges are touched (monitor or neighbor)
+        let touchCount = [edges.left, edges.right, edges.top, edges.bottom].filter { $0 }.count
+
+        // Tiled = touches at least 2 edges
+        // Floating = touches 0 or 1 edges (isolated)
+        return touchCount >= 2
+    }
+
+    /// Filter windows to only include tiled ones (falls back to all if none are tiled)
+    private func filterTiledWindows(
+        _ windows: [ExternalWindow],
+        monitorFrame: CGRect
+    ) -> [ExternalWindow] {
+        let tiled = windows.filter { isTiledWindow(window: $0, allWindows: windows, monitorFrame: monitorFrame) }
+
+        // Fall back to all windows if none are detected as tiled
+        return tiled.isEmpty ? windows : tiled
+    }
+
+    /// Count max windows at any horizontal slice (for determining column count)
+    /// Windows at the same X level (overlapping horizontally) count as one column
+    private func maxWindowsHorizontally(_ windows: [ExternalWindow]) -> Int {
+        guard !windows.isEmpty else { return 1 }
+
+        var maxCount = 1
+        let allYPositions = windows.flatMap { [$0.frame.minY, $0.frame.maxY, ($0.frame.minY + $0.frame.maxY) / 2] }
+
+        for y in allYPositions {
+            // Get windows that span this Y coordinate
+            let windowsAtY = windows.filter { $0.frame.minY <= y && $0.frame.maxY >= y }
+            guard !windowsAtY.isEmpty else { continue }
+
+            // Sort by left edge (minX)
+            let sortedByX = windowsAtY.sorted { $0.frame.minX < $1.frame.minX }
+
+            // Merge overlapping windows into columns and count distinct columns
+            var columnCount = 1
+            var currentColumnMaxX = sortedByX[0].frame.maxX
+
+            for window in sortedByX.dropFirst() {
+                // If this window's left is past the current column's right (with tolerance),
+                // it's a new column. Otherwise it overlaps/is stacked = same column.
+                if window.frame.minX >= currentColumnMaxX - edgeTolerance {
+                    columnCount += 1
+                    currentColumnMaxX = window.frame.maxX
+                } else {
+                    // Window overlaps with current column, extend the column's right edge
+                    currentColumnMaxX = max(currentColumnMaxX, window.frame.maxX)
+                }
+            }
+
+            maxCount = max(maxCount, columnCount)
+        }
+
+        return maxCount
+    }
+
+    /// Count max windows at any vertical slice (for determining row count)
+    /// Windows at the same Y level (overlapping vertically) count as one row
+    private func maxWindowsVertically(_ windows: [ExternalWindow]) -> Int {
+        guard !windows.isEmpty else { return 1 }
+
+        var maxCount = 1
+        let allXPositions = windows.flatMap { [$0.frame.minX, $0.frame.maxX, ($0.frame.minX + $0.frame.maxX) / 2] }
+
+        for x in allXPositions {
+            // Get windows that span this X coordinate
+            let windowsAtX = windows.filter { $0.frame.minX <= x && $0.frame.maxX >= x }
+            guard !windowsAtX.isEmpty else { continue }
+
+            // Sort by top edge (minY in AX coords = top of screen)
+            let sortedByY = windowsAtX.sorted { $0.frame.minY < $1.frame.minY }
+
+            // Merge overlapping windows into rows and count distinct rows
+            var rowCount = 1
+            var currentRowMaxY = sortedByY[0].frame.maxY
+
+            for window in sortedByY.dropFirst() {
+                // If this window's top is below the current row's bottom (with tolerance),
+                // it's a new row. Otherwise it overlaps/is side-by-side = same row.
+                if window.frame.minY >= currentRowMaxY - edgeTolerance {
+                    rowCount += 1
+                    currentRowMaxY = window.frame.maxY
+                } else {
+                    // Window overlaps with current row, extend the row's bottom
+                    currentRowMaxY = max(currentRowMaxY, window.frame.maxY)
+                }
+            }
+
+            maxCount = max(maxCount, rowCount)
+        }
+
+        return maxCount
+    }
+
+    // MARK: - Layout Scanning
+
     /// Scan existing windows on the monitor and build layout from their positions
     func scanExistingLayout() -> Bool {
         guard let monitor = selectedMonitor else { return false }
@@ -461,37 +623,64 @@ class WindowManager: ObservableObject {
 
     /// Scan windows as column-based layout
     private func scanAsColumns(_ windowsOnMonitor: [ExternalWindow], monitor: Monitor) {
-        // Sort windows by X position to detect columns
-        let sortedByX = windowsOnMonitor.sorted { $0.frame.minX < $1.frame.minX }
+        // Convert monitor frame to AX coordinates for edge detection
+        let monitorFrameAX = convertFrameToAXCoordinates(monitor.frame)
 
-        // Group windows into columns (windows with similar X positions)
-        var columnGroups: [[ExternalWindow]] = []
-        let columnThreshold: CGFloat = 50 // Windows within 50px are in same column
+        // Filter to tiled windows only (excludes floating windows)
+        let tiledWindows = filterTiledWindows(windowsOnMonitor, monitorFrame: monitorFrameAX)
+
+        // Determine column count from max horizontal windows at any Y
+        let columnCount = maxWindowsHorizontally(tiledWindows)
+
+        guard columnCount > 0 else {
+            columns = []
+            return
+        }
+
+        // Sort windows by X position (left to right)
+        let sortedByX = tiledWindows.sorted { $0.frame.minX < $1.frame.minX }
+
+        // Create exactly columnCount evenly-spaced boundaries
+        let monitorWidth = monitorFrameAX.width
+        let columnWidth = monitorWidth / CGFloat(columnCount)
+        var columnBoundaries: [CGFloat] = []
+        for i in 0..<columnCount {
+            columnBoundaries.append(monitorFrameAX.minX + CGFloat(i) * columnWidth)
+        }
+
+        // Assign windows to columns based on which boundary range they fall into
+        var columnGroups: [[ExternalWindow]] = Array(repeating: [], count: columnCount)
 
         for window in sortedByX {
-            if let lastGroup = columnGroups.last,
-               let lastWindow = lastGroup.first,
-               abs(window.frame.minX - lastWindow.frame.minX) < columnThreshold {
-                // Add to existing column
-                columnGroups[columnGroups.count - 1].append(window)
-            } else {
-                // Start new column
-                columnGroups.append([window])
+            // Use window's horizontal center to determine column
+            let windowCenterX = (window.frame.minX + window.frame.maxX) / 2
+            var columnIndex = 0
+            for (i, boundary) in columnBoundaries.enumerated() {
+                let nextBoundary = (i < columnBoundaries.count - 1) ? columnBoundaries[i + 1] : monitorFrameAX.maxX
+                if windowCenterX >= boundary && windowCenterX < nextBoundary {
+                    columnIndex = i
+                    break
+                }
             }
+            // Clamp to valid range
+            columnIndex = min(columnIndex, columnCount - 1)
+            columnGroups[columnIndex].append(window)
         }
+
+        // Remove empty columns
+        columnGroups = columnGroups.filter { !$0.isEmpty }
 
         // Build columns with proportions
         let totalWidth = monitor.frame.width
         var newColumns: [Column] = []
 
         for group in columnGroups {
-            // Sort windows in column by Y (top to bottom)
-            // In AX coords: Y=0 at top, so lower minY = higher on screen
+            // Sort windows in column by Y (top to bottom in AX coords)
             let sortedByY = group.sorted { $0.frame.minY < $1.frame.minY }
 
-            // Calculate column width from first window (they should all be similar)
-            let columnWidth = group.first?.frame.width ?? totalWidth / CGFloat(columnGroups.count)
-            let widthProportion = columnWidth / totalWidth
+            // Calculate column width from average of windows in this column
+            let avgWidth = group.reduce(0) { $0 + $1.frame.width } / CGFloat(group.count)
+            let widthProportion = avgWidth / totalWidth
 
             // Build windows with height proportions
             let totalHeight = monitor.frame.height
@@ -531,24 +720,52 @@ class WindowManager: ObservableObject {
 
     /// Scan windows as row-based layout
     private func scanAsRows(_ windowsOnMonitor: [ExternalWindow], monitor: Monitor) {
-        // Sort windows by Y position to detect rows (top to bottom in AX coords)
-        let sortedByY = windowsOnMonitor.sorted { $0.frame.minY < $1.frame.minY }
+        // Convert monitor frame to AX coordinates for edge detection
+        let monitorFrameAX = convertFrameToAXCoordinates(monitor.frame)
 
-        // Group windows into rows (windows with similar Y positions)
-        var rowGroups: [[ExternalWindow]] = []
-        let rowThreshold: CGFloat = 50 // Windows within 50px are in same row
+        // Filter to tiled windows only (excludes floating windows)
+        let tiledWindows = filterTiledWindows(windowsOnMonitor, monitorFrame: monitorFrameAX)
+
+        // Determine row count from max vertical windows at any X
+        let rowCount = maxWindowsVertically(tiledWindows)
+
+        guard rowCount > 0 else {
+            rows = []
+            return
+        }
+
+        // Sort windows by Y position (top to bottom in AX coords)
+        let sortedByY = tiledWindows.sorted { $0.frame.minY < $1.frame.minY }
+
+        // Create exactly rowCount evenly-spaced boundaries
+        let monitorHeight = monitorFrameAX.height
+        let rowHeight = monitorHeight / CGFloat(rowCount)
+        var rowBoundaries: [CGFloat] = []
+        for i in 0..<rowCount {
+            rowBoundaries.append(monitorFrameAX.minY + CGFloat(i) * rowHeight)
+        }
+
+        // Assign windows to rows based on which boundary range they fall into
+        var rowGroups: [[ExternalWindow]] = Array(repeating: [], count: rowCount)
 
         for window in sortedByY {
-            if let lastGroup = rowGroups.last,
-               let lastWindow = lastGroup.first,
-               abs(window.frame.minY - lastWindow.frame.minY) < rowThreshold {
-                // Add to existing row
-                rowGroups[rowGroups.count - 1].append(window)
-            } else {
-                // Start new row
-                rowGroups.append([window])
+            // Use window's vertical center to determine row
+            let windowCenterY = (window.frame.minY + window.frame.maxY) / 2
+            var rowIndex = 0
+            for (i, boundary) in rowBoundaries.enumerated() {
+                let nextBoundary = (i < rowBoundaries.count - 1) ? rowBoundaries[i + 1] : monitorFrameAX.maxY
+                if windowCenterY >= boundary && windowCenterY < nextBoundary {
+                    rowIndex = i
+                    break
+                }
             }
+            // Clamp to valid range
+            rowIndex = min(rowIndex, rowCount - 1)
+            rowGroups[rowIndex].append(window)
         }
+
+        // Remove empty rows
+        rowGroups = rowGroups.filter { !$0.isEmpty }
 
         // Build rows with proportions
         let totalHeight = monitor.frame.height
@@ -558,9 +775,9 @@ class WindowManager: ObservableObject {
             // Sort windows in row by X (left to right)
             let sortedByX = group.sorted { $0.frame.minX < $1.frame.minX }
 
-            // Calculate row height from first window (they should all be similar)
-            let rowHeight = group.first?.frame.height ?? totalHeight / CGFloat(rowGroups.count)
-            let heightProportion = rowHeight / totalHeight
+            // Calculate row height from average of windows in this row
+            let avgHeight = group.reduce(0) { $0 + $1.frame.height } / CGFloat(group.count)
+            let heightProportion = avgHeight / totalHeight
 
             // Build windows with width proportions
             let totalWidth = monitor.frame.width
