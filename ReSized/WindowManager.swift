@@ -219,6 +219,9 @@ class WindowManager: ObservableObject {
 
     /// Initialize with a specific number of columns
     func setupColumns(count: Int) {
+        // Stop any active management first
+        stopManaging()
+
         let proportion = 1.0 / CGFloat(count)
         columns = (0..<count).map { _ in
             Column(widthProportion: proportion, windows: [])
@@ -231,6 +234,9 @@ class WindowManager: ObservableObject {
     func scanExistingLayout() -> Bool {
         guard let monitor = selectedMonitor else { return false }
         guard AccessibilityHelper.checkAccessibilityPermissions() else { return false }
+
+        // Stop any active management first
+        stopManaging()
 
         let allWindows = WindowDiscovery.discoverAllWindows()
 
