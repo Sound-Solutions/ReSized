@@ -185,6 +185,7 @@ struct MonitorTabs: View {
             .padding(.horizontal)
             .padding(.vertical, 6)
         }
+        .padding(.top, 28) // Push below invisible title bar area
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
     }
 }
@@ -198,39 +199,40 @@ struct MonitorTab: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: "display")
-                    .font(.caption)
+        HStack(spacing: 6) {
+            Image(systemName: "display")
+                .font(.caption)
 
-                Text(monitor.name)
-                    .font(.caption)
-                    .lineLimit(1)
+            Text(monitor.name)
+                .font(.caption)
+                .lineLimit(1)
 
-                if isManaging {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 6, height: 6)
-                } else if hasLayout {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 6, height: 6)
-                }
+            if isManaging {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 6, height: 6)
+            } else if hasLayout {
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 6, height: 6)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(isSelected ? Color.accentColor.opacity(0.2) :
-                          (isHovered ? Color(nsColor: .controlBackgroundColor) : Color.clear))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 1)
-            )
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? Color.accentColor.opacity(0.2) :
+                      (isHovered ? Color(nsColor: .controlBackgroundColor) : Color.clear))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 6))
+        .simultaneousGesture(TapGesture().onEnded {
+            action()
+        })
+        .cursor(.pointingHand)
     }
 }
 
