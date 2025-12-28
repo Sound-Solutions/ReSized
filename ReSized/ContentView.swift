@@ -23,6 +23,11 @@ struct ContentView: View {
                 AccessibilityHelper.requestAccessibilityPermissions()
             }
             windowManager.refreshMonitors()
+
+            // Auto-scan all monitors on launch
+            if windowManager.selectedMonitor == nil {
+                windowManager.scanAllMonitors()
+            }
         }
     }
 }
@@ -370,7 +375,31 @@ struct ConfigureColumnsView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "chevron.left")
-                        Text("Columns")
+                        Text("Setup")
+                    }
+                }
+
+                Spacer()
+
+                // Column controls
+                HStack(spacing: 8) {
+                    Button {
+                        if windowManager.columns.count > 1 {
+                            windowManager.removeColumn(at: windowManager.columns.count - 1)
+                        }
+                    } label: {
+                        Image(systemName: "minus")
+                    }
+                    .disabled(windowManager.columns.count <= 1)
+
+                    Text("\(windowManager.columns.count) columns")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    Button {
+                        windowManager.addColumn()
+                    } label: {
+                        Image(systemName: "plus")
                     }
                 }
 
@@ -433,26 +462,6 @@ struct ColumnLayoutPreview: View {
                         ColumnDividerHandle(dividerIndex: index)
                     }
                 }
-
-                // Add column button
-                Button {
-                    windowManager.addColumn()
-                    selectedColumn = windowManager.columns.count - 1
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 44)
-                        .frame(maxHeight: .infinity)
-                        .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1, antialiased: true)
-                        )
-                }
-                .buttonStyle(.plain)
-                .padding(.leading, 8)
             }
             .padding()
         }
@@ -583,7 +592,7 @@ struct WindowTilePreview: View {
     private func colorForApp(_ name: String) -> Color {
         let hash = abs(name.hashValue)
         let hue = Double(hash % 360) / 360.0
-        return Color(hue: hue, saturation: 0.2, brightness: 0.95)
+        return Color(hue: hue, saturation: 0.5, brightness: 0.35)
     }
 }
 
@@ -862,7 +871,7 @@ struct ActiveWindowTile: View {
     private func colorForApp(_ name: String) -> Color {
         let hash = abs(name.hashValue)
         let hue = Double(hash % 360) / 360.0
-        return Color(hue: hue, saturation: 0.25, brightness: 0.92)
+        return Color(hue: hue, saturation: 0.5, brightness: 0.35)
     }
 }
 

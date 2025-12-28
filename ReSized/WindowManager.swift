@@ -1,6 +1,59 @@
 import SwiftUI
 import Combine
 import CoreVideo
+import AppKit
+
+// MARK: - Monitor Highlight Overlay
+
+/// Shows a red ring around the selected monitor (like Arrange Displays)
+class MonitorHighlightWindow: NSWindow {
+    init(for screen: NSScreen) {
+        super.init(
+            contentRect: screen.frame,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+
+        self.isOpaque = false
+        self.backgroundColor = .clear
+        self.level = .screenSaver  // Above most windows
+        self.ignoresMouseEvents = true
+        self.collectionBehavior = [.canJoinAllSpaces, .stationary]
+
+        // Create the red ring view
+        let ringView = MonitorRingView(frame: screen.frame)
+        self.contentView = ringView
+    }
+
+    static var currentHighlight: MonitorHighlightWindow?
+
+    static func show(on screen: NSScreen) {
+        hide()
+        let window = MonitorHighlightWindow(for: screen)
+        window.orderFront(nil)
+        currentHighlight = window
+    }
+
+    static func hide() {
+        currentHighlight?.orderOut(nil)
+        currentHighlight = nil
+    }
+}
+
+class MonitorRingView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let borderWidth: CGFloat = 6
+        let insetRect = bounds.insetBy(dx: borderWidth / 2, dy: borderWidth / 2)
+
+        NSColor.systemRed.setStroke()
+        let path = NSBezierPath(roundedRect: insetRect, xRadius: 8, yRadius: 8)
+        path.lineWidth = borderWidth
+        path.stroke()
+    }
+}
 
 /// A window placed in a column with its height proportion within that column
 struct ColumnWindow: Identifiable, Equatable {
@@ -194,8 +247,22 @@ class WindowManager: ObservableObject {
         // Update container bounds in case screen changed
         currentLayout?.updateBounds(from: monitor.frame)
 
+        // Show highlight ring on the selected monitor (unless actively managing)
+        if currentLayout?.isActive != true {
+            MonitorHighlightWindow.show(on: monitor.screen)
+        }
+
         // Notify SwiftUI of the change
         objectWillChange.send()
+    }
+
+    /// Update the highlight ring visibility based on state
+    func updateHighlight() {
+        if let monitor = selectedMonitor, currentLayout?.isActive != true {
+            MonitorHighlightWindow.show(on: monitor.screen)
+        } else {
+            MonitorHighlightWindow.hide()
+        }
     }
 
     private func updateContainerBounds() {
@@ -216,6 +283,34 @@ class WindowManager: ObservableObject {
     }
 
     // MARK: - Setup
+
+    /// Scan all monitors on launch and select the main one
+    func scanAllMonitors() {
+        guard AccessibilityHelper.checkAccessibilityPermissions() else { return }
+
+        // Scan each monitor
+        for monitor in availableMonitors {
+            // Create layout for this monitor
+            if monitorLayouts[monitor.id] == nil {
+                monitorLayouts[monitor.id] = MonitorLayout(monitor: monitor)
+            }
+
+            // Temporarily select to scan
+            selectedMonitor = monitor
+            _ = scanExistingLayout()
+        }
+
+        // Select main monitor and go to configuring
+        if let mainMonitor = availableMonitors.first(where: { $0.isMain }) ?? availableMonitors.first {
+            selectMonitor(mainMonitor)
+
+            // Ensure we're in configuring state (even if no windows found)
+            if columns.isEmpty {
+                setupColumns(count: 2)  // Default to 2 columns
+            }
+            appState = .configuring
+        }
+    }
 
     /// Initialize with a specific number of columns
     func setupColumns(count: Int) {
@@ -638,6 +733,9 @@ class WindowManager: ObservableObject {
     func startManaging() {
         guard let layout = currentLayout else { return }
 
+        // Hide monitor highlight when actively managing
+        MonitorHighlightWindow.hide()
+
         layout.isActive = true
         layout.appState = .active
         objectWillChange.send()
@@ -712,6 +810,11 @@ class WindowManager: ObservableObject {
             layout.displayLink = nil
         }
         layout.expectedFrames.removeAll()
+
+        // Show highlight again when not actively managing
+        if let monitor = selectedMonitor {
+            MonitorHighlightWindow.show(on: monitor.screen)
+        }
     }
 
     private func applyLayoutAndUpdateExpected(for layout: MonitorLayout) {
