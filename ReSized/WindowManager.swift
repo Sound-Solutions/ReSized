@@ -534,11 +534,6 @@ class WindowManager: ObservableObject {
     func removeColumn(at index: Int) {
         guard index < columns.count, columns.count > 1 else { return }
 
-        // Move any windows back to available
-        for colWindow in columns[index].windows {
-            // Windows will be rediscovered on next refresh
-        }
-
         columns.remove(at: index)
 
         // Redistribute widths equally
