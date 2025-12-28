@@ -16,8 +16,48 @@ struct WindowDragData: Codable, Transferable {
     }
 }
 
+// MARK: - Permission Overlay (First Launch)
+
+struct PermissionOverlay: View {
+    var onGrantAccess: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.6)
+                .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.secondary)
+
+                Text("Accessibility Permission Required")
+                    .font(.headline)
+
+                Text("ReSized needs accessibility access to scan and manage your windows.")
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 260)
+
+                Button("Grant Access") {
+                    onGrantAccess()
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(.top, 8)
+            }
+            .padding(24)
+            .background(Color(NSColor.windowBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .shadow(radius: 20)
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var windowManager: WindowManager
+    @State private var hasAccessibilityPermission = false
+    @State private var permissionTimer: Timer?
 
     var body: some View {
         Group {
@@ -28,21 +68,47 @@ struct ContentView: View {
                 MonitorSelectView()
             case .configuring:
                 ConfigureLayoutView()
+                    .overlay {
+                        if !hasAccessibilityPermission {
+                            PermissionOverlay {
+                                AccessibilityHelper.requestAccessibilityPermissions()
+                                startPermissionPolling()
+                            }
+                        }
+                    }
             case .active:
                 ActiveLayoutView()
             }
         }
         .frame(minWidth: 700, minHeight: 500)
         .onAppear {
-            // Request accessibility if needed - macOS will show its own prompt
-            if !AccessibilityHelper.checkAccessibilityPermissions() {
-                AccessibilityHelper.requestAccessibilityPermissions()
-            }
+            hasAccessibilityPermission = AccessibilityHelper.checkAccessibilityPermissions()
+
             windowManager.refreshMonitors()
 
-            // Show mode picker on first launch
+            // Skip directly to editing mode for the monitor at mouse location
             if windowManager.selectedMonitor == nil {
-                windowManager.appState = .modeSelect
+                windowManager.skipToEditingMode()
+            }
+
+            // Start polling if permissions not yet granted
+            if !hasAccessibilityPermission {
+                startPermissionPolling()
+            }
+        }
+        .onDisappear {
+            permissionTimer?.invalidate()
+        }
+    }
+
+    private func startPermissionPolling() {
+        permissionTimer?.invalidate()
+        permissionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
+            if AccessibilityHelper.checkAccessibilityPermissions() {
+                timer.invalidate()
+                hasAccessibilityPermission = true
+                // Scan windows now that we have permission
+                _ = windowManager.scanExistingLayout()
             }
         }
     }
@@ -447,7 +513,7 @@ struct ConfigureLayoutView: View {
     @EnvironmentObject var windowManager: WindowManager
     @State private var selectedIndex: Int = 0
     @State private var showingWindowPicker = false
-    @State private var useCurrentLayout: Bool = true  // Track if using scanned layout
+    @State private var useCurrentLayout: Bool = true  // Use scanned layout by default
 
     var body: some View {
         VStack(spacing: 0) {
@@ -474,13 +540,13 @@ struct ConfigureLayoutView: View {
                     get: { windowManager.layoutMode },
                     set: { newMode in
                         windowManager.layoutMode = newMode
-                        // Clear other mode's data and rescan
+                        windowManager.saveLayoutMode(newMode)  // Remember for next launch
+                        // Clear other mode's data and rescan with new mode
                         if newMode == .columns {
                             windowManager.rows = []
                         } else {
                             windowManager.columns = []
                         }
-                        // Auto-rescan with new mode
                         if useCurrentLayout {
                             _ = windowManager.scanExistingLayout()
                         } else {
@@ -1359,6 +1425,9 @@ struct ActiveLayoutView: View {
 
                 Spacer()
 
+                // Save/Load menu - available while running
+                LayoutMenu()
+
                 Button("Reset") {
                     windowManager.resetToMonitorSelect()
                 }
@@ -1496,6 +1565,8 @@ struct LayoutMenu: View {
     @State private var saveAsWorkspace = false
     @State private var selectedPresetSlot = 0  // 0 = None, 1-9 = slot
     @State private var savedLayouts: [SavedLayoutInfo] = []
+    @State private var monitorPresetNames: [Int: String] = [:]
+    @State private var workspacePresetNames: [Int: String] = [:]
 
     struct SavedLayoutInfo: Identifiable {
         let id = UUID()
@@ -1553,6 +1624,10 @@ struct LayoutMenu: View {
             VStack(spacing: 16) {
                 Text("Save Layout")
                     .font(.headline)
+                    .onAppear {
+                        monitorPresetNames = windowManager.getMonitorPresetNames()
+                        workspacePresetNames = windowManager.getWorkspacePresetNames()
+                    }
 
                 TextField("Layout Name", text: $layoutName)
                     .textFieldStyle(.roundedBorder)
@@ -1567,19 +1642,24 @@ struct LayoutMenu: View {
                 .frame(width: 280)
 
                 // Preset slot picker
-                HStack {
-                    Text("Assign to preset:")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Assign to hotkey:")
+                        .font(.subheadline)
+
                     Picker("", selection: $selectedPresetSlot) {
                         Text("None").tag(0)
                         ForEach(1...9, id: \.self) { slot in
-                            if saveAsWorkspace {
-                                Text("⌘⌥⇧\(slot)").tag(slot)
+                            let presetNames = saveAsWorkspace ? workspacePresetNames : monitorPresetNames
+                            let shortcut = saveAsWorkspace ? "⌘⌥⇧\(slot)" : "⌘⇧\(slot)"
+                            if let existingName = presetNames[slot] {
+                                Text("\(shortcut): \(existingName)").tag(slot)
                             } else {
-                                Text("⌘⇧\(slot)").tag(slot)
+                                Text("\(shortcut): (empty)").tag(slot)
                             }
                         }
                     }
-                    .frame(width: 100)
+                    .pickerStyle(.menu)
+                    .frame(width: 280)
                 }
 
                 HStack {
@@ -1638,13 +1718,13 @@ struct SettingsView: View {
             Section("Keyboard Shortcuts") {
                 ShortcutRow(action: "Toggle Start/Stop", shortcut: "⌘⇧R")
                 Divider()
-                ShortcutRow(action: "Monitor Presets 1-9", shortcut: "⌘⇧1-9")
-                Text("Quick-save if empty, quick-load if filled")
+                ShortcutRow(action: "Load Preset 1-9", shortcut: "⌘⇧1-9")
+                Text("Load preset for current monitor")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Divider()
-                ShortcutRow(action: "Workspace Presets 1-9", shortcut: "⌘⌥⇧1-9")
-                Text("Save/load all monitors at once")
+                ShortcutRow(action: "Load All Monitors", shortcut: "⌘⌥⇧1-9")
+                Text("Load workspace preset (all monitors)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

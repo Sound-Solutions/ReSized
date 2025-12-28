@@ -38,8 +38,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Hotkey ID scheme:
     // ID 1 = Cmd+Shift+R (toggle start/stop)
-    // ID 10-18 = Cmd+Shift+1-9 (per-monitor presets)
-    // ID 20-28 = Cmd+Option+Shift+1-9 (workspace presets)
+    // ID 10-18 = Cmd+Shift+1-9 (load monitor preset for focused window's monitor)
+    // ID 20-28 = Cmd+Option+Shift+1-9 (load workspace preset - all monitors)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Check accessibility permissions on launch
@@ -102,7 +102,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Key codes for 1-9: 18, 19, 20, 21, 23, 22, 26, 28, 25
         let numberKeyCodes: [UInt32] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
 
-        // Register Cmd+Shift+1-9 (per-monitor presets) - IDs 10-18
+        // Register Cmd+Shift+1-9 (load monitor preset) - IDs 10-18
         for (index, keyCode) in numberKeyCodes.enumerated() {
             registerSingleHotKey(
                 keyCode: keyCode,
@@ -112,7 +112,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
 
-        // Register Cmd+Option+Shift+1-9 (workspace presets) - IDs 20-28
+        // Register Cmd+Option+Shift+1-9 (load workspace preset) - IDs 20-28
         for (index, keyCode) in numberKeyCodes.enumerated() {
             registerSingleHotKey(
                 keyCode: keyCode,
@@ -148,11 +148,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static func handleHotKey(id: UInt32) {
+        NSLog("🔥 Hotkey pressed: id=%d", id)
         let wm = WindowManager.shared
 
         switch id {
         case 1:
             // Toggle start/stop
+            NSLog("  -> Toggle start/stop")
             if wm.hasAnyActiveLayout {
                 wm.stopAllLayouts()
             } else {
@@ -160,16 +162,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
         case 10...18:
-            // Per-monitor preset (Cmd+Shift+1-9)
+            // Load monitor preset for focused window's monitor (Cmd+Shift+1-9)
             let slot = Int(id) - 9  // Convert ID 10-18 to slot 1-9
-            wm.handleMonitorPreset(slot: slot)
+            NSLog("  -> Load monitor preset slot %d", slot)
+            wm.handleMonitorPresetLoad(slot: slot)
 
         case 20...28:
-            // Workspace preset (Cmd+Option+Shift+1-9)
+            // Load workspace preset - all monitors (Cmd+Option+Shift+1-9)
             let slot = Int(id) - 19  // Convert ID 20-28 to slot 1-9
-            wm.handleWorkspacePreset(slot: slot)
+            NSLog("  -> Load workspace preset slot %d", slot)
+            wm.loadWorkspacePresetBySlot(slot: slot)
 
         default:
+            NSLog("  -> Unknown hotkey id")
             break
         }
     }
@@ -198,6 +203,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let showConfigItem = NSMenuItem(title: "Show Config...", action: #selector(showConfig), keyEquivalent: ",")
         showConfigItem.target = self
         menu.addItem(showConfigItem)
+
+        // Settings item
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: "")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -236,6 +246,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quitApp() {
         NSApp.terminate(nil)
+    }
+
+    @objc private func openSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        // Open the SwiftUI Settings window
+        if #available(macOS 14.0, *) {
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } else {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+        }
     }
 
     @objc private func updateMenuState() {

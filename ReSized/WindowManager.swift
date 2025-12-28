@@ -214,6 +214,27 @@ class WindowManager: ObservableObject {
         return monitorLayouts[monitor.id]
     }
 
+    /// Get the monitor containing the currently focused window
+    func getMonitorForFocusedWindow() -> Monitor? {
+        guard let focusedWindow = WindowDiscovery.getFrontmostWindow() else { return nil }
+        let windowFrame = focusedWindow.frame
+
+        // Find which monitor contains the window center
+        let windowCenter = CGPoint(x: windowFrame.midX, y: windowFrame.midY)
+        return availableMonitors.first { monitor in
+            monitor.frame.contains(windowCenter)
+        }
+    }
+
+    /// Get the monitor where the mouse cursor is located (for hotkey detection)
+    func getMonitorAtMouseLocation() -> Monitor? {
+        let mouseLocation = NSEvent.mouseLocation
+        // NSEvent.mouseLocation is in screen coordinates (Y=0 at bottom)
+        return availableMonitors.first { monitor in
+            monitor.frame.contains(mouseLocation)
+        }
+    }
+
     var appState: AppState {
         get { currentLayout?.appState ?? .monitorSelect }
         set {
@@ -342,12 +363,18 @@ class WindowManager: ObservableObject {
     }
 
     func selectMonitor(_ monitor: Monitor) {
-        selectedMonitor = monitor
+        let isNewLayout = monitorLayouts[monitor.id] == nil
 
-        // Create layout for this monitor if it doesn't exist
-        if monitorLayouts[monitor.id] == nil {
-            monitorLayouts[monitor.id] = MonitorLayout(monitor: monitor)
+        // Create layout for this monitor BEFORE selecting it (so currentLayout isn't nil)
+        if isNewLayout {
+            let layout = MonitorLayout(monitor: monitor)
+            layout.appState = .configuring  // Don't show mode picker when switching tabs
+            layout.layoutMode = loadLastUsedLayoutMode()  // Use saved mode preference
+            monitorLayouts[monitor.id] = layout
         }
+
+        // Now select the monitor (currentLayout will return the layout we just created)
+        selectedMonitor = monitor
 
         // Update container bounds in case screen changed
         currentLayout?.updateBounds(from: monitor.frame)
@@ -355,6 +382,14 @@ class WindowManager: ObservableObject {
         // Show highlight ring on the selected monitor (unless actively managing)
         if currentLayout?.isActive != true {
             MonitorHighlightWindow.show(on: monitor.screen)
+        }
+
+        // Scan windows when switching tabs (if layout is empty and not actively managing)
+        if AccessibilityHelper.checkAccessibilityPermissions() && currentLayout?.isActive != true {
+            let isEmpty = (currentLayout?.columns.isEmpty ?? true) && (currentLayout?.rows.isEmpty ?? true)
+            if isEmpty {
+                _ = scanExistingLayout()
+            }
         }
 
         // Notify SwiftUI of the change
@@ -393,6 +428,9 @@ class WindowManager: ObservableObject {
     func setModeAndScan(_ mode: LayoutMode) {
         guard AccessibilityHelper.checkAccessibilityPermissions() else { return }
 
+        // Save the mode choice for future launches
+        saveLayoutMode(mode)
+
         // Create layouts for all monitors with the chosen mode
         for monitor in availableMonitors {
             if monitorLayouts[monitor.id] == nil {
@@ -403,6 +441,45 @@ class WindowManager: ObservableObject {
 
         // Now scan all monitors
         scanAllMonitors()
+    }
+
+    /// Skip initial pages and go directly to editing mode for the monitor at mouse location
+    func skipToEditingMode() {
+        // Load last used mode or default to columns
+        let mode = loadLastUsedLayoutMode()
+
+        // Create layouts for all monitors with the chosen mode and configuring state
+        for monitor in availableMonitors {
+            if monitorLayouts[monitor.id] == nil {
+                monitorLayouts[monitor.id] = MonitorLayout(monitor: monitor)
+            }
+            monitorLayouts[monitor.id]?.layoutMode = mode
+            monitorLayouts[monitor.id]?.appState = .configuring  // All monitors start in configuring
+        }
+
+        // Get the monitor at mouse location, or fall back to main/first
+        let targetMonitor = getMonitorAtMouseLocation()
+            ?? availableMonitors.first(where: { $0.isMain })
+            ?? availableMonitors.first
+
+        guard let monitor = targetMonitor else { return }
+
+        // Select and scan just this monitor
+        selectMonitor(monitor)
+
+        // Only scan if we have accessibility permissions
+        if AccessibilityHelper.checkAccessibilityPermissions() {
+            _ = scanExistingLayout()
+        }
+
+        // Ensure we're in configuring state (even if no windows found)
+        if layoutMode == .columns && columns.isEmpty {
+            setupColumns(count: 2)
+        } else if layoutMode == .rows && rows.isEmpty {
+            setupRows(count: 2)
+        }
+
+        appState = .configuring
     }
 
     /// Scan all monitors on launch and select the main one
@@ -1506,7 +1583,11 @@ class WindowManager: ObservableObject {
 
     func startManaging() {
         guard let layout = currentLayout else { return }
+        startManaging(layout: layout)
+    }
 
+    /// Start managing a specific layout (used by hotkey preset loading)
+    func startManaging(layout: MonitorLayout) {
         // Hide monitor highlight when actively managing
         MonitorHighlightWindow.hide()
 
@@ -2354,6 +2435,21 @@ class WindowManager: ObservableObject {
     private static let savedLayoutsKey = "SavedLayouts"
     private static let monitorPresetsKey = "MonitorPresets_v1"
     private static let workspacePresetsKey = "WorkspacePresets_v1"
+    private static let lastUsedLayoutModeKey = "LastUsedLayoutMode"
+
+    /// Load the last used layout mode from UserDefaults
+    func loadLastUsedLayoutMode() -> LayoutMode {
+        if let modeString = UserDefaults.standard.string(forKey: Self.lastUsedLayoutModeKey),
+           let mode = LayoutMode(rawValue: modeString) {
+            return mode
+        }
+        return .columns  // Default to columns
+    }
+
+    /// Save the layout mode to UserDefaults
+    func saveLayoutMode(_ mode: LayoutMode) {
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.lastUsedLayoutModeKey)
+    }
 
     /// Save the current layout configuration with a name
     func saveCurrentLayout(name: String, asWorkspace: Bool = false, presetSlot: Int? = nil) {
@@ -2366,16 +2462,29 @@ class WindowManager: ObservableObject {
 
     /// Save current monitor's layout
     private func saveMonitorLayout(name: String, presetSlot: Int? = nil) {
-        guard let layout = currentLayout else { return }
+        guard let layout = currentLayout,
+              let monitorId = selectedMonitor?.id else { return }
 
         let saved = createSavedLayout(from: layout, name: name, presetSlot: presetSlot)
 
+        // Save to named layouts list (for menu)
         var layouts = loadSavedLayoutsList()
         layouts.removeAll { $0.name == name }
         layouts.append(saved)
 
         if let data = try? JSONEncoder().encode(layouts) {
             UserDefaults.standard.set(data, forKey: Self.savedLayoutsKey)
+        }
+
+        // Also save to monitor presets if a slot was assigned (for hotkeys)
+        if let slot = presetSlot {
+            var presets = loadMonitorPresetsList()
+            presets.removeAll { $0.presetSlot == slot && $0.monitorId == monitorId }
+            presets.append(saved)
+
+            if let data = try? JSONEncoder().encode(presets) {
+                UserDefaults.standard.set(data, forKey: Self.monitorPresetsKey)
+            }
         }
     }
 
@@ -2444,7 +2553,8 @@ class WindowManager: ObservableObject {
                             windowTitle: colWin.window.title,
                             bundleIdentifier: AppLauncher.getBundleIdentifier(for: colWin.window.ownerName),
                             proportion: colWin.heightProportion,
-                            isPlaceholder: false
+                            isPlaceholder: false,
+                            frame: colWin.window.frame  // Store frame for better matching
                         )
                     }
                 )
@@ -2458,7 +2568,8 @@ class WindowManager: ObservableObject {
                             windowTitle: rowWin.window.title,
                             bundleIdentifier: AppLauncher.getBundleIdentifier(for: rowWin.window.ownerName),
                             proportion: rowWin.widthProportion,
-                            isPlaceholder: false
+                            isPlaceholder: false,
+                            frame: rowWin.window.frame  // Store frame for better matching
                         )
                     }
                 )
@@ -2475,24 +2586,43 @@ class WindowManager: ObservableObject {
         return workspaces
     }
 
-    // MARK: - Monitor Presets (Cmd+Shift+1-9)
+    // MARK: - Monitor Presets (⌘⇧1-9 = load for focused window's monitor)
 
-    /// Handle monitor preset hotkey: save if empty, load if filled
-    func handleMonitorPreset(slot: Int) {
-        guard let monitor = selectedMonitor ?? availableMonitors.first else { return }
+    /// Handle monitor preset LOAD hotkey (⌘⇧1-9): Loads preset for monitor where mouse is
+    func handleMonitorPresetLoad(slot: Int) {
+        // Use the monitor where the mouse cursor is located
+        let mouseLocation = NSEvent.mouseLocation
+        NSLog("🖱️ Mouse at: %@", String(describing: mouseLocation))
+        NSLog("📺 Available monitors: %@", availableMonitors.map { "\($0.name): \($0.id) frame=\($0.frame)" }.joined(separator: ", "))
 
-        if let existing = getMonitorPreset(slot: slot, monitorId: monitor.id) {
-            // Load existing preset
-            loadMonitorPreset(existing)
-            print("Loaded monitor preset \(slot)")
+        guard let monitor = getMonitorAtMouseLocation() ?? availableMonitors.first else {
+            NSLog("❌ No monitor found!")
+            return
+        }
+
+        NSLog("🎯 Detected monitor: %@ (id=%@)", monitor.name, monitor.id)
+        NSLog("📦 Looking for preset slot %d on monitor %@", slot, monitor.id)
+
+        let allPresets = loadMonitorPresetsList()
+        NSLog("📦 All presets: %@", allPresets.map { "slot=\($0.presetSlot ?? -1), monitor=\($0.monitorId ?? "nil")" }.joined(separator: ", "))
+
+        let existing = getMonitorPreset(slot: slot, monitorId: monitor.id)
+        NSLog("📋 Preset exists: %@", existing != nil ? "yes" : "no")
+        NSLog("📋 Layout exists for monitor: %@", monitorLayouts[monitor.id] != nil ? "yes" : "no")
+
+        // Create layout for this monitor if it doesn't exist
+        if monitorLayouts[monitor.id] == nil {
+            NSLog("🔧 Creating layout for monitor %@", monitor.id)
+            monitorLayouts[monitor.id] = MonitorLayout(monitor: monitor)
+        }
+
+        if let existing = existing,
+           let layout = monitorLayouts[monitor.id] {
+            NSLog("✅ Found preset, loading...")
+            loadLayoutIntoMonitor(saved: existing, layout: layout)
+            startManaging(layout: layout)  // Use specific layout, not currentLayout
         } else {
-            // Save current layout to this slot
-            guard currentLayout != nil, hasAnyWindows else {
-                print("No layout to save for preset \(slot)")
-                return
-            }
-            saveMonitorPreset(slot: slot, monitorId: monitor.id)
-            print("Saved monitor preset \(slot)")
+            NSLog("❌ No preset found for slot %d on monitor %@", slot, monitor.id)
         }
     }
 
@@ -2501,8 +2631,33 @@ class WindowManager: ObservableObject {
         return presets.first { $0.presetSlot == slot && $0.monitorId == monitorId }
     }
 
+    /// Get names of presets in each slot for the current monitor (for UI display)
+    func getMonitorPresetNames() -> [Int: String] {
+        guard let monitorId = selectedMonitor?.id else { return [:] }
+        let presets = loadMonitorPresetsList().filter { $0.monitorId == monitorId }
+        var result: [Int: String] = [:]
+        for preset in presets {
+            if let slot = preset.presetSlot {
+                result[slot] = preset.name
+            }
+        }
+        return result
+    }
+
+    /// Get names of workspace presets in each slot (for UI display)
+    func getWorkspacePresetNames() -> [Int: String] {
+        let workspaces = loadWorkspacesList()
+        var result: [Int: String] = [:]
+        for workspace in workspaces {
+            if let slot = workspace.presetSlot {
+                result[slot] = workspace.name
+            }
+        }
+        return result
+    }
+
     func saveMonitorPreset(slot: Int, monitorId: String) {
-        guard let layout = currentLayout else { return }
+        guard let layout = monitorLayouts[monitorId] else { return }
 
         let saved = createSavedLayout(from: layout, name: "Preset \(slot)", presetSlot: slot)
 
@@ -2515,8 +2670,8 @@ class WindowManager: ObservableObject {
         }
     }
 
-    func loadMonitorPreset(_ preset: SavedLayout) {
-        guard let layout = currentLayout else { return }
+    func loadMonitorPreset(_ preset: SavedLayout, into monitorId: String) {
+        guard let layout = monitorLayouts[monitorId] else { return }
         loadLayoutIntoMonitor(saved: preset, layout: layout)
         // Auto-start managing after loading a preset via hotkey
         startManaging()
@@ -2538,23 +2693,12 @@ class WindowManager: ObservableObject {
         return presets
     }
 
-    // MARK: - Workspace Presets (Cmd+Option+Shift+1-9)
+    // MARK: - Workspace Presets (⌘⌥⇧1-9 = load all monitors)
 
-    /// Handle workspace preset hotkey: save if empty, load if filled
-    func handleWorkspacePreset(slot: Int) {
+    /// Handle workspace preset LOAD hotkey (⌘⌥⇧1-9): Loads preset for all monitors
+    func loadWorkspacePresetBySlot(slot: Int) {
         if let existing = getWorkspacePreset(slot: slot) {
-            // Load existing workspace
             loadWorkspacePreset(existing)
-            print("Loaded workspace preset \(slot)")
-        } else {
-            // Save current workspace to this slot
-            let hasAnyContent = monitorLayouts.values.contains { !$0.columns.isEmpty || !$0.rows.isEmpty }
-            guard hasAnyContent else {
-                print("No layouts to save for workspace preset \(slot)")
-                return
-            }
-            saveWorkspacePreset(slot: slot)
-            print("Saved workspace preset \(slot)")
         }
     }
 
@@ -2715,10 +2859,35 @@ class WindowManager: ObservableObject {
             return exactMatch
         }
 
-        // Fall back to app name only
-        return availableWindows.first {
+        // Fall back to app name matching
+        let candidates = availableWindows.filter {
             !usedIds.contains($0.id) && $0.ownerName == slot.ownerName
         }
+
+        // If only one candidate, return it
+        if candidates.count == 1 {
+            return candidates.first
+        }
+
+        // Multiple candidates (e.g., multiple Terminal windows)
+        // Use frame proximity to pick the best match
+        if candidates.count > 1, let savedFrame = slot.savedFrame {
+            return candidates.min(by: { window1, window2 in
+                frameDistance(window1.frame, savedFrame) < frameDistance(window2.frame, savedFrame)
+            })
+        }
+
+        // No saved frame, just return first available
+        return candidates.first
+    }
+
+    /// Calculate distance between two frames (center-to-center)
+    private func frameDistance(_ frame1: CGRect, _ frame2: CGRect) -> CGFloat {
+        let center1 = CGPoint(x: frame1.midX, y: frame1.midY)
+        let center2 = CGPoint(x: frame2.midX, y: frame2.midY)
+        let dx = center1.x - center2.x
+        let dy = center1.y - center2.y
+        return sqrt(dx * dx + dy * dy)
     }
 }
 
@@ -2774,14 +2943,31 @@ struct SavedWindowSlot: Codable {
     let proportion: CGFloat
     let isPlaceholder: Bool         // true = app wasn't open when saved
 
+    // Frame position for matching windows with same app name (e.g., multiple Terminal windows)
+    let frameX: CGFloat?
+    let frameY: CGFloat?
+    let frameWidth: CGFloat?
+    let frameHeight: CGFloat?
+
+    var savedFrame: CGRect? {
+        guard let x = frameX, let y = frameY, let w = frameWidth, let h = frameHeight else {
+            return nil
+        }
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+
     // Backwards compatibility
     init(ownerName: String, windowTitle: String?, bundleIdentifier: String? = nil,
-         proportion: CGFloat, isPlaceholder: Bool = false) {
+         proportion: CGFloat, isPlaceholder: Bool = false, frame: CGRect? = nil) {
         self.ownerName = ownerName
         self.windowTitle = windowTitle
         self.bundleIdentifier = bundleIdentifier
         self.proportion = proportion
         self.isPlaceholder = isPlaceholder
+        self.frameX = frame?.origin.x
+        self.frameY = frame?.origin.y
+        self.frameWidth = frame?.width
+        self.frameHeight = frame?.height
     }
 
     init(from decoder: Decoder) throws {
@@ -2791,6 +2977,11 @@ struct SavedWindowSlot: Codable {
         bundleIdentifier = try container.decodeIfPresent(String.self, forKey: .bundleIdentifier)
         proportion = try container.decode(CGFloat.self, forKey: .proportion)
         isPlaceholder = try container.decodeIfPresent(Bool.self, forKey: .isPlaceholder) ?? false
+        // Frame fields - nil for old saves that don't have them
+        frameX = try container.decodeIfPresent(CGFloat.self, forKey: .frameX)
+        frameY = try container.decodeIfPresent(CGFloat.self, forKey: .frameY)
+        frameWidth = try container.decodeIfPresent(CGFloat.self, forKey: .frameWidth)
+        frameHeight = try container.decodeIfPresent(CGFloat.self, forKey: .frameHeight)
     }
 }
 
