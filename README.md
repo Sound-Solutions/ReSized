@@ -4,6 +4,8 @@
 
 ReSized is a lightweight macOS window manager that lets you define custom layouts for each monitor and snap windows into place with keyboard shortcuts. Perfect for multi-monitor setups where you need consistent, repeatable window arrangements.
 
+**Stop resizing windows one at a time.** With ReSized, you arrange all your windows together in one layout, then apply it instantly. No more dragging corners, no more pixel-perfect positioning — just define your layout once and let ReSized handle the rest.
+
 ## Features
 
 - **Custom Layouts** — Design your own window arrangements with columns, rows, and flexible proportions
