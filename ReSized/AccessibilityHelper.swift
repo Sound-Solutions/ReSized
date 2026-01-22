@@ -1,6 +1,10 @@
 import AppKit
 import ApplicationServices
 import Combine
+import os.log
+
+/// Logger for debugging AX issues - writes to debug.txt
+private let axLogger = Logger(subsystem: "com.resized", category: "Accessibility")
 
 /// Helper for macOS Accessibility API interactions
 struct AccessibilityHelper {
@@ -23,6 +27,29 @@ struct AccessibilityHelper {
             NSWorkspace.shared.open(url)
         }
     }
+
+    /// Check if an AXUIElement is still valid (window/app hasn't closed)
+    static func isElementValid(_ element: AXUIElement) -> Bool {
+        // Try to get the role - if this fails, the element is invalid
+        var roleValue: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue)
+        return result == .success
+    }
+
+    /// Log to debug.txt for troubleshooting
+    static func logDebug(_ message: String) {
+        let debugPath = FileManager.default.currentDirectoryPath + "/debug.txt"
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(timestamp)] \(message)\n"
+
+        if let handle = FileHandle(forWritingAtPath: debugPath) {
+            handle.seekToEndOfFile()
+            handle.write(line.data(using: .utf8)!)
+            handle.closeFile()
+        } else {
+            try? line.write(toFile: debugPath, atomically: true, encoding: .utf8)
+        }
+    }
 }
 
 /// Represents an external window that can be controlled
@@ -35,6 +62,11 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
     @Published var frame: CGRect
     @Published var title: String
     @Published var isMinimized: Bool = false
+
+    /// Track if this window's AXUIElement is still valid
+    var isValid: Bool {
+        AccessibilityHelper.isElementValid(axElement)
+    }
 
     init(axElement: AXUIElement, pid: pid_t, ownerName: String) {
         self.axElement = axElement
@@ -50,6 +82,29 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
 
     // MARK: - Window Properties
 
+    /// AX API error codes for better debugging
+    private static func describeAXError(_ error: AXError) -> String {
+        switch error {
+        case .success: return "success"
+        case .failure: return "failure"
+        case .illegalArgument: return "illegalArgument"
+        case .invalidUIElement: return "invalidUIElement"
+        case .invalidUIElementObserver: return "invalidUIElementObserver"
+        case .cannotComplete: return "cannotComplete"
+        case .attributeUnsupported: return "attributeUnsupported"
+        case .actionUnsupported: return "actionUnsupported"
+        case .notificationUnsupported: return "notificationUnsupported"
+        case .notImplemented: return "notImplemented"
+        case .notificationAlreadyRegistered: return "notificationAlreadyRegistered"
+        case .notificationNotRegistered: return "notificationNotRegistered"
+        case .apiDisabled: return "apiDisabled"
+        case .noValue: return "noValue"
+        case .parameterizedAttributeUnsupported: return "parameterizedAttributeUnsupported"
+        case .notEnoughPrecision: return "notEnoughPrecision"
+        @unknown default: return "unknown(\(error.rawValue))"
+        }
+    }
+
     static func getFrame(from element: AXUIElement) -> CGRect? {
         // Set a short timeout to prevent hanging on dead windows
         AXUIElementSetMessagingTimeout(element, 0.1)
@@ -57,16 +112,33 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
         var positionValue: CFTypeRef?
         var sizeValue: CFTypeRef?
 
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue) == .success,
-              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue) == .success else {
+        let posResult = AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue)
+        let sizeResult = AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue)
+
+        // Check for invalid element errors specifically
+        if posResult == .invalidUIElement || sizeResult == .invalidUIElement {
+            return nil  // Window is gone, don't log - this is expected
+        }
+
+        guard posResult == .success, sizeResult == .success else {
+            // Only log unexpected errors
+            if posResult != .success && posResult != .cannotComplete {
+                AccessibilityHelper.logDebug("getFrame position error: \(describeAXError(posResult))")
+            }
             return nil
         }
 
         var position = CGPoint.zero
         var size = CGSize.zero
 
-        AXValueGetValue(positionValue as! AXValue, .cgPoint, &position)
-        AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
+        // Safely cast with nil checks
+        guard let posValue = positionValue, CFGetTypeID(posValue) == AXValueGetTypeID(),
+              let szValue = sizeValue, CFGetTypeID(szValue) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        AXValueGetValue(posValue as! AXValue, .cgPoint, &position)
+        AXValueGetValue(szValue as! AXValue, .cgSize, &size)
 
         return CGRect(origin: position, size: size)
     }
@@ -98,6 +170,11 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
     // MARK: - Window Manipulation
 
     func setFrame(_ newFrame: CGRect) -> Bool {
+        // Check if element is still valid before attempting to set frame
+        guard isValid else {
+            return false
+        }
+
         // Set a short timeout to prevent hanging on dead windows
         AXUIElementSetMessagingTimeout(axElement, 0.1)
 
@@ -109,11 +186,21 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
         // Set position first (top-left in AX coords), then size
         var pos = axFrame.origin
         guard let positionValue = AXValueCreate(.cgPoint, &pos) else { return false }
-        let positionSet = AXUIElementSetAttributeValue(axElement, kAXPositionAttribute as CFString, positionValue) == .success
+        let posResult = AXUIElementSetAttributeValue(axElement, kAXPositionAttribute as CFString, positionValue)
+        let positionSet = posResult == .success
 
         var sz = axFrame.size
         guard let sizeValue = AXValueCreate(.cgSize, &sz) else { return false }
-        let sizeSet = AXUIElementSetAttributeValue(axElement, kAXSizeAttribute as CFString, sizeValue) == .success
+        let sizeResult = AXUIElementSetAttributeValue(axElement, kAXSizeAttribute as CFString, sizeValue)
+        let sizeSet = sizeResult == .success
+
+        // Log failures for debugging (but not invalidUIElement - that's expected when windows close)
+        if !positionSet && posResult != .invalidUIElement {
+            AccessibilityHelper.logDebug("setFrame position failed for \(ownerName): \(Self.describeAXError(posResult))")
+        }
+        if !sizeSet && sizeResult != .invalidUIElement {
+            AccessibilityHelper.logDebug("setFrame size failed for \(ownerName): \(Self.describeAXError(sizeResult))")
+        }
 
         if positionSet || sizeSet {
             DispatchQueue.main.async {

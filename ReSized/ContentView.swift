@@ -923,34 +923,72 @@ struct WindowTilePreview: View {
     let windowIndex: Int
     let heightProportion: CGFloat
     @EnvironmentObject var windowManager: WindowManager
+    @State private var isHovered = false
 
     var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(columnWindow.window.ownerName)
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
+        Group {
+            if let window = columnWindow.window {
+                // Single window view
+                singleWindowView(window: window)
+            } else if let container = columnWindow.nestedContainer {
+                // Nested container view
+                NestedContainerPreview(
+                    container: container,
+                    columnIndex: columnIndex,
+                    windowIndex: windowIndex,
+                    isInColumn: true
+                )
+            }
+        }
+    }
 
-                Text(columnWindow.window.title)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+    @ViewBuilder
+    private func singleWindowView(window: ExternalWindow) -> some View {
+        VStack(spacing: 4) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(window.ownerName)
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+
+                    Text(window.title)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Button {
+                    windowManager.removeWindow(columnWindow.id, fromColumn: columnIndex)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
 
-            Spacer()
-
-            Button {
-                windowManager.removeWindow(columnWindow.id, fromColumn: columnIndex)
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
+            // Split button when hovered - columns can add horizontal splits (sub-columns)
+            if isHovered {
+                Button {
+                    windowManager.splitColumnCell(columnIndex: columnIndex, windowIndex: windowIndex, direction: .horizontal)
+                } label: {
+                    Image(systemName: "rectangle.split.1x2")
+                        .rotationEffect(.degrees(90))
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Split into columns")
             }
-            .buttonStyle(.plain)
         }
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(colorForApp(columnWindow.window.ownerName))
+        .background(colorForApp(window.ownerName))
+        .onHover { hovering in
+            isHovered = hovering
+        }
         .draggable(WindowDragData(
             windowId: columnWindow.id,
             sourceColumn: columnIndex,
@@ -963,6 +1001,321 @@ struct WindowTilePreview: View {
     private func colorForApp(_ name: String) -> Color {
         let hue = windowManager.hueForApp(name)
         return Color(hue: hue, saturation: 1.0, brightness: 0.5).opacity(0.5)
+    }
+}
+
+// MARK: - Nested Container Views
+
+/// Preview for a nested container within a column or row cell
+struct NestedContainerPreview: View {
+    let container: LayoutContainer
+    let columnIndex: Int?
+    let windowIndex: Int
+    let isInColumn: Bool
+    var rowIndex: Int? = nil
+    @EnvironmentObject var windowManager: WindowManager
+    @State private var isDropTarget = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            Group {
+                if container.direction == .horizontal {
+                    HStack(spacing: 0) {
+                        nestedChildrenView(size: geometry.size)
+                    }
+                } else {
+                    VStack(spacing: 0) {
+                        nestedChildrenView(size: geometry.size)
+                    }
+                }
+            }
+        }
+        .padding(4)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(isDropTarget ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: isDropTarget ? 2 : 1)
+        )
+        .dropDestination(for: WindowDragData.self) { items, _ in
+            guard let dragData = items.first else { return false }
+            handleNestedDrop(dragData: dragData)
+            return true
+        } isTargeted: { isTargeted in
+            isDropTarget = isTargeted
+        }
+    }
+
+    @ViewBuilder
+    private func nestedChildrenView(size: CGSize) -> some View {
+        ForEach(Array(container.children.enumerated()), id: \.element.id) { index, child in
+            let childSize = container.direction == .horizontal
+                ? CGSize(width: size.width * child.proportion, height: size.height)
+                : CGSize(width: size.width, height: size.height * child.proportion)
+
+            switch child {
+            case .window(let windowNode):
+                NestedWindowTile(
+                    windowNode: windowNode,
+                    nestedIndex: index,
+                    columnIndex: columnIndex,
+                    rowIndex: rowIndex,
+                    windowIndex: windowIndex,
+                    isInColumn: isInColumn
+                )
+                .frame(width: childSize.width, height: childSize.height)
+            case .container:
+                // Deeper nesting - show placeholder for now
+                Text("Nested")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(width: childSize.width, height: childSize.height)
+                    .background(Color(nsColor: .controlBackgroundColor))
+            }
+
+            // Add divider between children (not after last)
+            if index < container.children.count - 1 {
+                NestedDividerHandle(
+                    dividerIndex: index,
+                    columnIndex: columnIndex,
+                    rowIndex: rowIndex,
+                    windowIndex: windowIndex,
+                    isHorizontal: container.direction == .horizontal,
+                    isInColumn: isInColumn
+                )
+            }
+        }
+
+        // Show drop zone only when there's exactly 1 child (after initial split)
+        if container.children.count == 1 {
+            NestedDropZone(
+                columnIndex: columnIndex,
+                rowIndex: rowIndex,
+                windowIndex: windowIndex,
+                isInColumn: isInColumn
+            )
+            .frame(
+                width: container.direction == .horizontal ? size.width * 0.5 : size.width,
+                height: container.direction == .vertical ? size.height * 0.5 : size.height
+            )
+        }
+    }
+
+    private func handleNestedDrop(dragData: WindowDragData) {
+        // Dragging from sidebar
+        if let externalWindowId = dragData.externalWindowId,
+           let window = windowManager.availableWindows.first(where: { $0.id == externalWindowId }) {
+            if isInColumn, let colIndex = columnIndex {
+                windowManager.addWindowToColumnNested(columnIndex: colIndex, windowIndex: windowIndex, window: window)
+            } else if let rIndex = rowIndex {
+                windowManager.addWindowToRowNested(rowIndex: rIndex, windowIndex: windowIndex, window: window)
+            }
+        }
+    }
+}
+
+/// A window tile within a nested container
+struct NestedWindowTile: View {
+    let windowNode: LayoutWindowNode
+    let nestedIndex: Int
+    let columnIndex: Int?
+    let rowIndex: Int?
+    let windowIndex: Int
+    let isInColumn: Bool
+    @EnvironmentObject var windowManager: WindowManager
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(windowNode.window.ownerName)
+                    .font(.caption2)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+
+                Text(windowNode.window.title)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Button {
+                if isInColumn, let colIndex = columnIndex {
+                    windowManager.removeWindowFromColumnNested(columnIndex: colIndex, windowIndex: windowIndex, nestedIndex: nestedIndex)
+                } else if let rIndex = rowIndex {
+                    windowManager.removeWindowFromRowNested(rowIndex: rIndex, windowIndex: windowIndex, nestedIndex: nestedIndex)
+                }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(colorForApp(windowNode.window.ownerName))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    private func colorForApp(_ name: String) -> Color {
+        let hue = windowManager.hueForApp(name)
+        return Color(hue: hue, saturation: 1.0, brightness: 0.5).opacity(0.5)
+    }
+}
+
+/// Divider handle for resizing within a nested container
+struct NestedDividerHandle: View {
+    let dividerIndex: Int
+    let columnIndex: Int?
+    let rowIndex: Int?
+    let windowIndex: Int
+    let isHorizontal: Bool  // true = horizontal layout (vertical divider)
+    let isInColumn: Bool
+    @EnvironmentObject var windowManager: WindowManager
+    @State private var isDragging = false
+    @State private var initialProp1: CGFloat = 0
+    @State private var initialProp2: CGFloat = 0
+
+    var body: some View {
+        Rectangle()
+            .fill(isDragging ? Color.accentColor : Color(nsColor: .separatorColor))
+            .frame(width: isHorizontal ? 6 : nil, height: isHorizontal ? nil : 6)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture()
+                    .onChanged { value in
+                        if !isDragging {
+                            // Store initial proportions at drag start
+                            isDragging = true
+                            if isInColumn, let colIndex = columnIndex {
+                                if let container = windowManager.columns[colIndex].windows[windowIndex].nestedContainer {
+                                    initialProp1 = container.children[dividerIndex].proportion
+                                    initialProp2 = container.children[dividerIndex + 1].proportion
+                                }
+                            } else if let rIndex = rowIndex {
+                                if let container = windowManager.rows[rIndex].windows[windowIndex].nestedContainer {
+                                    initialProp1 = container.children[dividerIndex].proportion
+                                    initialProp2 = container.children[dividerIndex + 1].proportion
+                                }
+                            }
+                        }
+                        let delta = isHorizontal ? value.translation.width : value.translation.height
+                        if isInColumn, let colIndex = columnIndex {
+                            windowManager.resizeNestedColumnDividerFromInitial(
+                                columnIndex: colIndex,
+                                windowIndex: windowIndex,
+                                dividerIndex: dividerIndex,
+                                initialProp1: initialProp1,
+                                initialProp2: initialProp2,
+                                delta: delta,
+                                containerSize: 200 // We'll use proportion-based calculation
+                            )
+                        } else if let rIndex = rowIndex {
+                            windowManager.resizeNestedRowDividerFromInitial(
+                                rowIndex: rIndex,
+                                windowIndex: windowIndex,
+                                dividerIndex: dividerIndex,
+                                initialProp1: initialProp1,
+                                initialProp2: initialProp2,
+                                delta: delta,
+                                containerSize: 200
+                            )
+                        }
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                    }
+            )
+            .onHover { hovering in
+                if hovering {
+                    if isHorizontal {
+                        NSCursor.resizeLeftRight.push()
+                    } else {
+                        NSCursor.resizeUpDown.push()
+                    }
+                } else {
+                    NSCursor.pop()
+                }
+            }
+    }
+}
+
+/// Drop zone for adding windows to a nested container
+struct NestedDropZone: View {
+    let columnIndex: Int?
+    let rowIndex: Int?
+    let windowIndex: Int
+    let isInColumn: Bool
+    @EnvironmentObject var windowManager: WindowManager
+    @State private var isDropTarget = false
+
+    var body: some View {
+        VStack {
+            Image(systemName: "plus")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(minWidth: 30, minHeight: 30)
+        .background(isDropTarget ? Color.accentColor.opacity(0.2) : Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
+                .foregroundStyle(isDropTarget ? Color.accentColor : Color(nsColor: .separatorColor))
+        )
+        .dropDestination(for: WindowDragData.self) { items, _ in
+            guard let dragData = items.first else { return false }
+
+            // Dragging from sidebar
+            if let externalWindowId = dragData.externalWindowId,
+               let window = windowManager.availableWindows.first(where: { $0.id == externalWindowId }) {
+                if isInColumn, let colIndex = columnIndex {
+                    windowManager.addWindowToColumnNested(columnIndex: colIndex, windowIndex: windowIndex, window: window)
+                } else if let rIndex = rowIndex {
+                    windowManager.addWindowToRowNested(rowIndex: rIndex, windowIndex: windowIndex, window: window)
+                }
+                return true
+            }
+
+            // Dragging from another column
+            if let sourceCol = dragData.sourceColumn, let sourceIndex = dragData.sourceIndex {
+                guard sourceCol < windowManager.columns.count,
+                      sourceIndex < windowManager.columns[sourceCol].windows.count,
+                      let window = windowManager.columns[sourceCol].windows[sourceIndex].window else {
+                    return false
+                }
+                // Remove from source first
+                windowManager.removeWindow(dragData.windowId, fromColumn: sourceCol)
+                // Add to nested container
+                if isInColumn, let colIndex = columnIndex {
+                    windowManager.addWindowToColumnNested(columnIndex: colIndex, windowIndex: windowIndex, window: window)
+                }
+                return true
+            }
+
+            // Dragging from another row
+            if let sourceRow = dragData.sourceRow, let sourceIndex = dragData.sourceIndex {
+                guard sourceRow < windowManager.rows.count,
+                      sourceIndex < windowManager.rows[sourceRow].windows.count,
+                      let window = windowManager.rows[sourceRow].windows[sourceIndex].window else {
+                    return false
+                }
+                // Remove from source first
+                windowManager.removeWindow(dragData.windowId, fromRow: sourceRow)
+                // Add to nested container
+                if let rIndex = rowIndex {
+                    windowManager.addWindowToRowNested(rowIndex: rIndex, windowIndex: windowIndex, window: window)
+                }
+                return true
+            }
+
+            return false
+        } isTargeted: { isTargeted in
+            isDropTarget = isTargeted
+        }
     }
 }
 
@@ -1157,41 +1510,74 @@ struct RowWindowTilePreview: View {
     let windowIndex: Int
     let widthProportion: CGFloat
     @EnvironmentObject var windowManager: WindowManager
+    @State private var isHovered = false
 
     var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(rowWindow.window.ownerName)
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
-
-                Text(rowWindow.window.title)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        Group {
+            if let window = rowWindow.window {
+                singleWindowView(window: window)
+            } else if let container = rowWindow.nestedContainer {
+                NestedRowContainerPreview(container: container, rowIndex: rowIndex, windowIndex: windowIndex)
             }
-
-            Spacer()
-
-            Button {
-                windowManager.removeWindow(rowWindow.id, fromRow: rowIndex)
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(colorForApp(rowWindow.window.ownerName))
-        .draggable(WindowDragData(
-            windowId: rowWindow.id,
-            sourceColumn: nil,
-            sourceRow: rowIndex,
-            sourceIndex: windowIndex,
-            externalWindowId: nil
-        ))
+    }
+
+    @ViewBuilder
+    private func singleWindowView(window: ExternalWindow) -> some View {
+        ZStack(alignment: .topTrailing) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(window.ownerName)
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+
+                    Text(window.title)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Button {
+                    windowManager.removeWindow(rowWindow.id, fromRow: rowIndex)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(colorForApp(window.ownerName))
+            .draggable(WindowDragData(
+                windowId: rowWindow.id,
+                sourceColumn: nil,
+                sourceRow: rowIndex,
+                sourceIndex: windowIndex,
+                externalWindowId: nil
+            ))
+
+            // Split button (vertical split to add sub-rows)
+            if isHovered {
+                Button {
+                    windowManager.splitRowCell(rowIndex: rowIndex, windowIndex: windowIndex, direction: .vertical)
+                } label: {
+                    Image(systemName: "square.split.1x2")
+                        .font(.caption)
+                        .foregroundStyle(.white)
+                        .padding(4)
+                        .background(Color.accentColor)
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(4)
+            }
+        }
+        .onHover { hovering in
+            isHovered = hovering
+        }
     }
 
     private func colorForApp(_ name: String) -> Color {
@@ -1530,7 +1916,7 @@ struct ActiveLayoutPreview: View {
                     ForEach(Array(windowManager.columns.enumerated()), id: \.element.id) { index, column in
                         VStack(spacing: 0) {
                             ForEach(Array(column.windows.enumerated()), id: \.element.id) { winIndex, colWindow in
-                                ActiveWindowTile(columnWindow: colWindow)
+                                ActiveWindowTile(columnWindow: colWindow, columnIndex: index, windowIndex: winIndex)
                                     .frame(height: (geometry.size.height - 20) * colWindow.heightProportion)
 
                                 if winIndex < column.windows.count - 1 {
@@ -1552,7 +1938,7 @@ struct ActiveLayoutPreview: View {
                     ForEach(Array(windowManager.rows.enumerated()), id: \.element.id) { index, row in
                         HStack(spacing: 0) {
                             ForEach(Array(row.windows.enumerated()), id: \.element.id) { winIndex, rowWindow in
-                                ActiveRowWindowTile(rowWindow: rowWindow)
+                                ActiveRowWindowTile(rowWindow: rowWindow, rowIndex: index, windowIndex: winIndex)
                                     .frame(width: (geometry.size.width - 20) * rowWindow.widthProportion)
 
                                 if winIndex < row.windows.count - 1 {
@@ -1576,24 +1962,33 @@ struct ActiveLayoutPreview: View {
 
 struct ActiveWindowTile: View {
     let columnWindow: ColumnWindow
+    let columnIndex: Int
+    let windowIndex: Int
     @EnvironmentObject var windowManager: WindowManager
 
     var body: some View {
-        VStack(spacing: 4) {
-            Text(columnWindow.window.ownerName)
-                .font(.caption)
-                .fontWeight(.medium)
+        Group {
+            if let window = columnWindow.window {
+                VStack(spacing: 4) {
+                    Text(window.ownerName)
+                        .font(.caption)
+                        .fontWeight(.medium)
 
-            Text(columnWindow.window.title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(colorForApp(columnWindow.window.ownerName))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .onTapGesture {
-            columnWindow.window.raise()
+                    Text(window.title)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(colorForApp(window.ownerName))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .onTapGesture {
+                    window.raise()
+                }
+            } else if let container = columnWindow.nestedContainer {
+                // Show nested container
+                ActiveNestedContainerTile(container: container, isColumn: true, columnIndex: columnIndex, windowIndex: windowIndex)
+            }
         }
     }
 
@@ -1605,30 +2000,323 @@ struct ActiveWindowTile: View {
 
 struct ActiveRowWindowTile: View {
     let rowWindow: RowWindow
+    let rowIndex: Int
+    let windowIndex: Int
     @EnvironmentObject var windowManager: WindowManager
 
     var body: some View {
-        VStack(spacing: 4) {
-            Text(rowWindow.window.ownerName)
-                .font(.caption)
-                .fontWeight(.medium)
+        Group {
+            if let window = rowWindow.window {
+                VStack(spacing: 4) {
+                    Text(window.ownerName)
+                        .font(.caption)
+                        .fontWeight(.medium)
 
-            Text(rowWindow.window.title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(colorForApp(rowWindow.window.ownerName))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .onTapGesture {
-            rowWindow.window.raise()
+                    Text(window.title)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(colorForApp(window.ownerName))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .onTapGesture {
+                    window.raise()
+                }
+            } else if let container = rowWindow.nestedContainer {
+                // Show nested container
+                ActiveNestedContainerTile(container: container, isColumn: false, rowIndex: rowIndex, windowIndex: windowIndex)
+            }
         }
     }
 
     private func colorForApp(_ name: String) -> Color {
         let hue = windowManager.hueForApp(name)
         return Color(hue: hue, saturation: 1.0, brightness: 0.5).opacity(0.5)
+    }
+}
+
+// MARK: - Nested Container Views for Active Layout
+
+struct ActiveNestedContainerTile: View {
+    let container: LayoutContainer
+    let isColumn: Bool
+    var columnIndex: Int? = nil
+    var rowIndex: Int? = nil
+    var windowIndex: Int = 0
+    @EnvironmentObject var windowManager: WindowManager
+
+    var body: some View {
+        GeometryReader { geometry in
+            Group {
+                if container.direction == .horizontal {
+                    HStack(spacing: 0) {
+                        ForEach(Array(container.children.enumerated()), id: \.element.id) { index, node in
+                            nodeView(node, proportion: node.proportion)
+                                .frame(width: geometry.size.width * node.proportion)
+
+                            // Add divider between children
+                            if index < container.children.count - 1 {
+                                ActiveNestedDivider(
+                                    dividerIndex: index,
+                                    columnIndex: columnIndex,
+                                    rowIndex: rowIndex,
+                                    windowIndex: windowIndex,
+                                    isHorizontal: true,
+                                    isColumn: isColumn,
+                                    containerSize: geometry.size.width
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(container.children.enumerated()), id: \.element.id) { index, node in
+                            nodeView(node, proportion: node.proportion)
+                                .frame(height: geometry.size.height * node.proportion)
+
+                            // Add divider between children
+                            if index < container.children.count - 1 {
+                                ActiveNestedDivider(
+                                    dividerIndex: index,
+                                    columnIndex: columnIndex,
+                                    rowIndex: rowIndex,
+                                    windowIndex: windowIndex,
+                                    isHorizontal: false,
+                                    isColumn: isColumn,
+                                    containerSize: geometry.size.height
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    @ViewBuilder
+    private func nodeView(_ node: LayoutNode, proportion: CGFloat) -> some View {
+        switch node {
+        case .window(let windowNode):
+            VStack(spacing: 2) {
+                Text(windowNode.window.ownerName)
+                    .font(.caption2)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                Text(windowNode.window.title)
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(colorForApp(windowNode.window.ownerName))
+            .onTapGesture {
+                windowNode.window.raise()
+            }
+        case .container(let nestedContainer):
+            ActiveNestedContainerTile(container: nestedContainer, isColumn: isColumn, columnIndex: columnIndex, rowIndex: rowIndex, windowIndex: windowIndex)
+        }
+    }
+
+    private func colorForApp(_ name: String) -> Color {
+        let hue = windowManager.hueForApp(name)
+        return Color(hue: hue, saturation: 1.0, brightness: 0.5).opacity(0.5)
+    }
+}
+
+/// Divider handle in active nested container view
+struct ActiveNestedDivider: View {
+    let dividerIndex: Int
+    let columnIndex: Int?
+    let rowIndex: Int?
+    let windowIndex: Int
+    let isHorizontal: Bool  // true = horizontal layout (vertical divider line)
+    let isColumn: Bool
+    let containerSize: CGFloat
+    @EnvironmentObject var windowManager: WindowManager
+    @State private var isDragging = false
+    @State private var initialProp1: CGFloat = 0
+    @State private var initialProp2: CGFloat = 0
+
+    var body: some View {
+        Rectangle()
+            .fill(isDragging ? Color.accentColor : Color(nsColor: .separatorColor))
+            .frame(width: isHorizontal ? 4 : nil, height: isHorizontal ? nil : 4)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture()
+                    .onChanged { value in
+                        if !isDragging {
+                            // Store initial proportions at drag start
+                            isDragging = true
+                            if isColumn, let colIndex = columnIndex {
+                                if let container = windowManager.columns[colIndex].windows[windowIndex].nestedContainer {
+                                    initialProp1 = container.children[dividerIndex].proportion
+                                    initialProp2 = container.children[dividerIndex + 1].proportion
+                                }
+                            } else if let rIndex = rowIndex {
+                                if let container = windowManager.rows[rIndex].windows[windowIndex].nestedContainer {
+                                    initialProp1 = container.children[dividerIndex].proportion
+                                    initialProp2 = container.children[dividerIndex + 1].proportion
+                                }
+                            }
+                        }
+                        let delta = isHorizontal ? value.translation.width : value.translation.height
+                        if isColumn, let colIndex = columnIndex {
+                            windowManager.resizeNestedColumnDividerFromInitial(
+                                columnIndex: colIndex,
+                                windowIndex: windowIndex,
+                                dividerIndex: dividerIndex,
+                                initialProp1: initialProp1,
+                                initialProp2: initialProp2,
+                                delta: delta,
+                                containerSize: containerSize
+                            )
+                        } else if let rIndex = rowIndex {
+                            windowManager.resizeNestedRowDividerFromInitial(
+                                rowIndex: rIndex,
+                                windowIndex: windowIndex,
+                                dividerIndex: dividerIndex,
+                                initialProp1: initialProp1,
+                                initialProp2: initialProp2,
+                                delta: delta,
+                                containerSize: containerSize
+                            )
+                        }
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                    }
+            )
+            .onHover { hovering in
+                if hovering {
+                    if isHorizontal {
+                        NSCursor.resizeLeftRight.push()
+                    } else {
+                        NSCursor.resizeUpDown.push()
+                    }
+                } else {
+                    NSCursor.pop()
+                }
+            }
+    }
+}
+
+struct NestedRowContainerPreview: View {
+    let container: LayoutContainer
+    let rowIndex: Int
+    let windowIndex: Int
+    @EnvironmentObject var windowManager: WindowManager
+
+    var body: some View {
+        VStack(spacing: 2) {
+            ForEach(Array(container.children.enumerated()), id: \.element.id) { idx, node in
+                switch node {
+                case .window(let windowNode):
+                    NestedRowWindowTile(
+                        window: windowNode.window,
+                        rowIndex: rowIndex,
+                        parentWindowIndex: windowIndex,
+                        nestedIndex: idx
+                    )
+                case .container(let nestedContainer):
+                    NestedRowContainerPreview(container: nestedContainer, rowIndex: rowIndex, windowIndex: windowIndex)
+                }
+            }
+
+            // Drop zone for adding more windows
+            NestedRowDropZone(rowIndex: rowIndex, windowIndex: windowIndex)
+        }
+        .padding(4)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+struct NestedRowWindowTile: View {
+    let window: ExternalWindow
+    let rowIndex: Int
+    let parentWindowIndex: Int
+    let nestedIndex: Int
+    @EnvironmentObject var windowManager: WindowManager
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(window.ownerName)
+                    .font(.caption2)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                Text(window.title)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button {
+                windowManager.removeWindowFromRowNested(rowIndex: rowIndex, windowIndex: parentWindowIndex, nestedIndex: nestedIndex)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(6)
+        .frame(maxWidth: .infinity)
+        .background(colorForApp(window.ownerName))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    private func colorForApp(_ name: String) -> Color {
+        let hue = windowManager.hueForApp(name)
+        return Color(hue: hue, saturation: 1.0, brightness: 0.5).opacity(0.5)
+    }
+}
+
+struct NestedRowDropZone: View {
+    let rowIndex: Int
+    let windowIndex: Int
+    @EnvironmentObject var windowManager: WindowManager
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 4)
+            .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
+            .foregroundStyle(.secondary.opacity(0.5))
+            .frame(height: 30)
+            .overlay {
+                Text("Drop here")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .dropDestination(for: WindowDragData.self) { items, _ in
+                guard let dragData = items.first else { return false }
+
+                // Don't allow dropping the same window on itself
+                if dragData.sourceRow == rowIndex && dragData.sourceIndex == windowIndex {
+                    return false
+                }
+
+                if let externalId = dragData.externalWindowId {
+                    // From sidebar
+                    if let window = windowManager.availableWindows.first(where: { $0.id == externalId }) {
+                        windowManager.addWindowToRowNested(rowIndex: rowIndex, windowIndex: windowIndex, window: window)
+                        return true
+                    }
+                } else if let sourceRow = dragData.sourceRow, let sourceIndex = dragData.sourceIndex {
+                    // From another row position
+                    guard sourceRow < windowManager.rows.count,
+                          sourceIndex < windowManager.rows[sourceRow].windows.count,
+                          let window = windowManager.rows[sourceRow].windows[sourceIndex].window else {
+                        return false
+                    }
+                    windowManager.removeWindow(dragData.windowId, fromRow: sourceRow)
+                    windowManager.addWindowToRowNested(rowIndex: rowIndex, windowIndex: windowIndex, window: window)
+                    return true
+                }
+                return false
+            } isTargeted: { _ in }
     }
 }
 

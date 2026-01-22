@@ -58,22 +58,61 @@ class MonitorRingView: NSView {
 /// A window placed in a column with its height proportion within that column
 struct ColumnWindow: Identifiable, Equatable {
     let id: UUID
-    var window: ExternalWindow
+    var window: ExternalWindow?  // nil if using nestedContainer
+    var nestedContainer: LayoutContainer?  // For nested splits within this cell
     /// Height proportion within the column (0.0 to 1.0)
     var heightProportion: CGFloat
 
+    /// Check if this cell has a nested container
+    var isNested: Bool { nestedContainer != nil }
+
+    /// Get all windows (either the single window or all from nested container)
+    var allWindows: [ExternalWindow] {
+        if let window = window {
+            return [window]
+        } else if let container = nestedContainer {
+            return container.allWindows
+        }
+        return []
+    }
+
+    init(id: UUID = UUID(), window: ExternalWindow, heightProportion: CGFloat = 1.0) {
+        self.id = id
+        self.window = window
+        self.nestedContainer = nil
+        self.heightProportion = heightProportion
+    }
+
+    init(id: UUID = UUID(), nestedContainer: LayoutContainer, heightProportion: CGFloat = 1.0) {
+        self.id = id
+        self.window = nil
+        self.nestedContainer = nestedContainer
+        self.heightProportion = heightProportion
+    }
+
     static func == (lhs: ColumnWindow, rhs: ColumnWindow) -> Bool {
-        lhs.id == rhs.id
+        lhs.id == rhs.id &&
+        lhs.window?.id == rhs.window?.id &&
+        lhs.nestedContainer?.id == rhs.nestedContainer?.id &&
+        lhs.nestedContainer?.children.count == rhs.nestedContainer?.children.count &&
+        lhs.nestedContainer?.children.first?.proportion == rhs.nestedContainer?.children.first?.proportion &&
+        lhs.heightProportion == rhs.heightProportion
     }
 }
 
 /// A column containing vertically stacked windows
 struct Column: Identifiable, Equatable {
-    let id = UUID()
+    let id: UUID
     /// Width proportion of the screen (0.0 to 1.0)
     var widthProportion: CGFloat
     /// Windows stacked vertically in this column
     var windows: [ColumnWindow]
+
+    init(id: UUID = UUID(), widthProportion: CGFloat, windows: [ColumnWindow]) {
+        self.id = id
+        self.widthProportion = widthProportion
+        self.windows = windows
+    }
 
     static func == (lhs: Column, rhs: Column) -> Bool {
         lhs.id == rhs.id
@@ -92,25 +131,155 @@ enum LayoutMode: String, CaseIterable {
 /// A window placed in a row with its width proportion within that row
 struct RowWindow: Identifiable, Equatable {
     let id: UUID
-    var window: ExternalWindow
+    var window: ExternalWindow?  // nil if using nestedContainer
+    var nestedContainer: LayoutContainer?  // For nested splits within this cell
     /// Width proportion within the row (0.0 to 1.0)
     var widthProportion: CGFloat
 
+    /// Check if this cell has a nested container
+    var isNested: Bool { nestedContainer != nil }
+
+    /// Get all windows (either the single window or all from nested container)
+    var allWindows: [ExternalWindow] {
+        if let window = window {
+            return [window]
+        } else if let container = nestedContainer {
+            return container.allWindows
+        }
+        return []
+    }
+
+    init(id: UUID = UUID(), window: ExternalWindow, widthProportion: CGFloat = 1.0) {
+        self.id = id
+        self.window = window
+        self.nestedContainer = nil
+        self.widthProportion = widthProportion
+    }
+
+    init(id: UUID = UUID(), nestedContainer: LayoutContainer, widthProportion: CGFloat = 1.0) {
+        self.id = id
+        self.window = nil
+        self.nestedContainer = nestedContainer
+        self.widthProportion = widthProportion
+    }
+
     static func == (lhs: RowWindow, rhs: RowWindow) -> Bool {
-        lhs.id == rhs.id
+        lhs.id == rhs.id &&
+        lhs.window?.id == rhs.window?.id &&
+        lhs.nestedContainer?.id == rhs.nestedContainer?.id &&
+        lhs.nestedContainer?.children.count == rhs.nestedContainer?.children.count &&
+        lhs.nestedContainer?.children.first?.proportion == rhs.nestedContainer?.children.first?.proportion &&
+        lhs.widthProportion == rhs.widthProportion
     }
 }
 
 /// A row containing horizontally arranged windows
 struct Row: Identifiable, Equatable {
-    let id = UUID()
+    let id: UUID
     /// Height proportion of the screen (0.0 to 1.0)
     var heightProportion: CGFloat
     /// Windows arranged horizontally in this row
     var windows: [RowWindow]
 
+    init(id: UUID = UUID(), heightProportion: CGFloat, windows: [RowWindow]) {
+        self.id = id
+        self.heightProportion = heightProportion
+        self.windows = windows
+    }
+
     static func == (lhs: Row, rhs: Row) -> Bool {
         lhs.id == rhs.id
+    }
+}
+
+// MARK: - Nested Container Support
+
+/// Direction for splitting a container
+enum SplitDirection: String, Codable {
+    case horizontal  // Children arranged left-to-right
+    case vertical    // Children arranged top-to-bottom
+}
+
+/// A window node within a nested container
+struct LayoutWindowNode: Identifiable, Equatable {
+    let id: UUID
+    var window: ExternalWindow
+    var proportion: CGFloat
+
+    init(window: ExternalWindow, proportion: CGFloat = 1.0) {
+        self.id = UUID()
+        self.window = window
+        self.proportion = proportion
+    }
+}
+
+/// A container that can hold windows or other containers
+struct LayoutContainer: Identifiable, Equatable {
+    let id: UUID
+    var direction: SplitDirection
+    var children: [LayoutNode]
+    var proportion: CGFloat
+
+    init(direction: SplitDirection, children: [LayoutNode] = [], proportion: CGFloat = 1.0) {
+        self.id = UUID()
+        self.direction = direction
+        self.children = children
+        self.proportion = proportion
+    }
+
+    /// Normalize proportions so they sum to 1.0
+    mutating func normalizeProportions() {
+        guard !children.isEmpty else { return }
+        let total = children.reduce(0) { $0 + $1.proportion }
+        if total > 0 {
+            for i in children.indices {
+                children[i].proportion = children[i].proportion / total
+            }
+        }
+    }
+
+    /// Get all windows in this container recursively
+    var allWindows: [ExternalWindow] {
+        children.flatMap { child -> [ExternalWindow] in
+            switch child {
+            case .window(let node):
+                return [node.window]
+            case .container(let container):
+                return container.allWindows
+            }
+        }
+    }
+}
+
+/// A node in the layout tree - either a window or a nested container
+enum LayoutNode: Identifiable, Equatable {
+    case window(LayoutWindowNode)
+    case container(LayoutContainer)
+
+    var id: UUID {
+        switch self {
+        case .window(let node): return node.id
+        case .container(let container): return container.id
+        }
+    }
+
+    var proportion: CGFloat {
+        get {
+            switch self {
+            case .window(let node): return node.proportion
+            case .container(let container): return container.proportion
+            }
+        }
+        set {
+            switch self {
+            case .window(var node):
+                node.proportion = newValue
+                self = .window(node)
+            case .container(var container):
+                container.proportion = newValue
+                self = .container(container)
+            }
+        }
     }
 }
 
@@ -962,9 +1131,9 @@ class WindowManager: ObservableObject {
 
         let discovered = WindowDiscovery.discoverAllWindows()
 
-        // Filter out windows already in columns or rows
-        var usedIds = Set(columns.flatMap { $0.windows.map { $0.window.id } })
-        usedIds.formUnion(rows.flatMap { $0.windows.map { $0.window.id } })
+        // Filter out windows already in columns or rows (including nested containers)
+        var usedIds = Set(columns.flatMap { $0.windows.flatMap { $0.allWindows.map { $0.id } } })
+        usedIds.formUnion(rows.flatMap { $0.windows.flatMap { $0.allWindows.map { $0.id } } })
         availableWindows = discovered.filter { !usedIds.contains($0.id) }
     }
 
@@ -1031,7 +1200,7 @@ class WindowManager: ObservableObject {
         guard fromColumn < columns.count, toColumn < columns.count else { return }
         guard let windowIndex = columns[fromColumn].windows.firstIndex(where: { $0.id == windowId }) else { return }
 
-        let window = columns[fromColumn].windows[windowIndex].window
+        guard let window = columns[fromColumn].windows[windowIndex].window else { return }
         removeWindow(windowId, fromColumn: fromColumn)
         addWindow(window, toColumn: toColumn)
     }
@@ -1062,8 +1231,8 @@ class WindowManager: ObservableObject {
         // Case 3: Dragging from another column
         if let sourceColumn = dragData.sourceColumn {
             // Find the window and move it
-            if let windowIndex = columns[sourceColumn].windows.firstIndex(where: { $0.id == dragData.windowId }) {
-                let window = columns[sourceColumn].windows[windowIndex].window
+            if let windowIndex = columns[sourceColumn].windows.firstIndex(where: { $0.id == dragData.windowId }),
+               let window = columns[sourceColumn].windows[windowIndex].window {
                 removeWindow(dragData.windowId, fromColumn: sourceColumn)
                 addWindow(window, toColumn: targetColumn, atIndex: atIndex)
             }
@@ -1110,8 +1279,8 @@ class WindowManager: ObservableObject {
         // Case 3: Dragging from another row
         if let sourceRow = dragData.sourceRow {
             // Find the window and move it
-            if let windowIndex = rows[sourceRow].windows.firstIndex(where: { $0.id == dragData.windowId }) {
-                let window = rows[sourceRow].windows[windowIndex].window
+            if let windowIndex = rows[sourceRow].windows.firstIndex(where: { $0.id == dragData.windowId }),
+               let window = rows[sourceRow].windows[windowIndex].window {
                 removeWindow(dragData.windowId, fromRow: sourceRow)
                 addWindow(window, toRow: targetRow, atIndex: atIndex)
             }
@@ -1481,20 +1650,25 @@ class WindowManager: ObservableObject {
                     height: windowHeight
                 )
 
-                // Respect window's min/max size constraints
-                frame = constrainFrame(frame, for: columnWindow.window)
+                if let window = columnWindow.window {
+                    // Single window - position it directly
+                    frame = constrainFrame(frame, for: window)
 
-                // For last column, keep right edge aligned (adjust x if width was constrained)
-                if isLastColumn && frame.width < columnWidth {
-                    frame.origin.x = rightEdge - frame.width
+                    // For last column, keep right edge aligned (adjust x if width was constrained)
+                    if isLastColumn && frame.width < columnWidth {
+                        frame.origin.x = rightEdge - frame.width
+                    }
+
+                    // For last window, keep bottom edge aligned (adjust y if height was constrained)
+                    if isLastWindow && frame.height < windowHeight {
+                        frame.origin.y = bottomEdge
+                    }
+
+                    _ = window.setFrame(frame)
+                } else if let container = columnWindow.nestedContainer {
+                    // Nested container - position all children
+                    applyNestedContainerLayout(container: container, in: frame)
                 }
-
-                // For last window, keep bottom edge aligned (adjust y if height was constrained)
-                if isLastWindow && frame.height < windowHeight {
-                    frame.origin.y = bottomEdge
-                }
-
-                _ = columnWindow.window.setFrame(frame)
 
                 // Move down for next window
                 currentTop -= windowHeight
@@ -1544,20 +1718,25 @@ class WindowManager: ObservableObject {
                     height: rowHeight
                 )
 
-                // Respect window's min/max size constraints
-                frame = constrainFrame(frame, for: rowWindow.window)
+                if let window = rowWindow.window {
+                    // Single window - position it directly
+                    frame = constrainFrame(frame, for: window)
 
-                // For last window in row, keep right edge aligned
-                if isLastWindow && frame.width < windowWidth {
-                    frame.origin.x = rightEdge - frame.width
+                    // For last window in row, keep right edge aligned
+                    if isLastWindow && frame.width < windowWidth {
+                        frame.origin.x = rightEdge - frame.width
+                    }
+
+                    // For last row, keep bottom edge aligned
+                    if isLastRow && frame.height < rowHeight {
+                        frame.origin.y = bottomEdge
+                    }
+
+                    _ = window.setFrame(frame)
+                } else if let container = rowWindow.nestedContainer {
+                    // Nested container - position all children
+                    applyNestedContainerLayout(container: container, in: frame)
                 }
-
-                // For last row, keep bottom edge aligned
-                if isLastRow && frame.height < rowHeight {
-                    frame.origin.y = bottomEdge
-                }
-
-                _ = rowWindow.window.setFrame(frame)
 
                 // Move right for next window
                 currentX += windowWidth
@@ -1577,6 +1756,382 @@ class WindowManager: ObservableObject {
         constrained.size.height = max(minSize.height, min(maxSize.height, frame.height))
 
         return constrained
+    }
+
+    /// Apply layout to a nested container within a given frame
+    private func applyNestedContainerLayout(container: LayoutContainer, in frame: CGRect) {
+        guard !container.children.isEmpty else { return }
+
+        if container.direction == .horizontal {
+            // Children arranged left-to-right
+            var currentX = frame.minX
+            for (index, child) in container.children.enumerated() {
+                let isLast = index == container.children.count - 1
+                let childWidth = isLast ? (frame.maxX - currentX) : (child.proportion * frame.width)
+                let childFrame = CGRect(x: currentX, y: frame.minY, width: childWidth, height: frame.height)
+
+                applyLayoutToNode(child, in: childFrame)
+                currentX += childWidth
+            }
+        } else {
+            // Children arranged top-to-bottom
+            var currentTop = frame.maxY
+            for (index, child) in container.children.enumerated() {
+                let isLast = index == container.children.count - 1
+                let childHeight = isLast ? (currentTop - frame.minY) : (child.proportion * frame.height)
+                let childFrame = CGRect(x: frame.minX, y: currentTop - childHeight, width: frame.width, height: childHeight)
+
+                applyLayoutToNode(child, in: childFrame)
+                currentTop -= childHeight
+            }
+        }
+    }
+
+    /// Apply layout to a single layout node (window or container)
+    private func applyLayoutToNode(_ node: LayoutNode, in frame: CGRect) {
+        switch node {
+        case .window(let windowNode):
+            let constrainedFrame = constrainFrame(frame, for: windowNode.window)
+            _ = windowNode.window.setFrame(constrainedFrame)
+        case .container(let nestedContainer):
+            applyNestedContainerLayout(container: nestedContainer, in: frame)
+        }
+    }
+
+    // MARK: - Split Functions for Nested Containers
+
+    /// Split a window cell in a column into a nested container
+    func splitColumnCell(columnIndex: Int, windowIndex: Int, direction: SplitDirection) {
+        guard columnIndex < columns.count else { return }
+        guard windowIndex < columns[columnIndex].windows.count else { return }
+
+        let cell = columns[columnIndex].windows[windowIndex]
+        guard let window = cell.window else { return }
+
+        // Create a nested container with the original window
+        let windowNode = LayoutWindowNode(window: window, proportion: 0.5)
+        let container = LayoutContainer(
+            direction: direction,
+            children: [.window(windowNode)],
+            proportion: 1.0
+        )
+
+        // Create the new cell with nested container
+        let newCell = ColumnWindow(
+            id: cell.id,
+            nestedContainer: container,
+            heightProportion: cell.heightProportion
+        )
+
+        // Force complete struct recreation for SwiftUI change detection
+        var newWindows = columns[columnIndex].windows
+        newWindows[windowIndex] = newCell
+        let newColumn = Column(
+            id: columns[columnIndex].id,
+            widthProportion: columns[columnIndex].widthProportion,
+            windows: newWindows
+        )
+        var newColumns = columns
+        newColumns[columnIndex] = newColumn
+        columns = newColumns
+
+        // Force objectWillChange notification
+        objectWillChange.send()
+
+        if isActive {
+            applyLayout()
+        }
+    }
+
+    /// Split a window cell in a row into a nested container
+    func splitRowCell(rowIndex: Int, windowIndex: Int, direction: SplitDirection) {
+        guard rowIndex < rows.count else { return }
+        guard windowIndex < rows[rowIndex].windows.count else { return }
+
+        let cell = rows[rowIndex].windows[windowIndex]
+        guard let window = cell.window else { return }
+
+        // Create a nested container with the original window
+        let windowNode = LayoutWindowNode(window: window, proportion: 0.5)
+        let container = LayoutContainer(
+            direction: direction,
+            children: [.window(windowNode)],
+            proportion: 1.0
+        )
+
+        // Create the new cell with nested container
+        let newCell = RowWindow(
+            id: cell.id,
+            nestedContainer: container,
+            widthProportion: cell.widthProportion
+        )
+
+        // Force complete struct recreation for SwiftUI change detection
+        var newWindows = rows[rowIndex].windows
+        newWindows[windowIndex] = newCell
+        let newRow = Row(
+            id: rows[rowIndex].id,
+            heightProportion: rows[rowIndex].heightProportion,
+            windows: newWindows
+        )
+        var newRows = rows
+        newRows[rowIndex] = newRow
+        rows = newRows
+
+        // Force objectWillChange notification
+        objectWillChange.send()
+
+        if isActive {
+            applyLayout()
+        }
+    }
+
+    /// Add a window to a nested container within a column cell
+    func addWindowToColumnNested(columnIndex: Int, windowIndex: Int, window: ExternalWindow) {
+        guard columnIndex < columns.count else { return }
+        guard windowIndex < columns[columnIndex].windows.count else { return }
+        guard var container = columns[columnIndex].windows[windowIndex].nestedContainer else { return }
+
+        // Add window to the container
+        let windowNode = LayoutWindowNode(window: window, proportion: 0.5)
+        container.children.append(.window(windowNode))
+        container.normalizeProportions()
+
+        // Create new cell with updated container
+        let cell = columns[columnIndex].windows[windowIndex]
+        let newCell = ColumnWindow(
+            id: cell.id,
+            nestedContainer: container,
+            heightProportion: cell.heightProportion
+        )
+
+        // Force complete struct recreation for SwiftUI
+        var newWindows = columns[columnIndex].windows
+        newWindows[windowIndex] = newCell
+        let newColumn = Column(
+            id: columns[columnIndex].id,
+            widthProportion: columns[columnIndex].widthProportion,
+            windows: newWindows
+        )
+        var newColumns = columns
+        newColumns[columnIndex] = newColumn
+        columns = newColumns
+
+        objectWillChange.send()
+        refreshAvailableWindows()
+
+        if isActive {
+            applyLayout()
+        }
+    }
+
+    /// Add a window to a nested container within a row cell
+    func addWindowToRowNested(rowIndex: Int, windowIndex: Int, window: ExternalWindow) {
+        guard rowIndex < rows.count else { return }
+        guard windowIndex < rows[rowIndex].windows.count else { return }
+        guard var container = rows[rowIndex].windows[windowIndex].nestedContainer else { return }
+
+        // Add window to the container
+        let windowNode = LayoutWindowNode(window: window, proportion: 0.5)
+        container.children.append(.window(windowNode))
+        container.normalizeProportions()
+
+        // Create new cell with updated container
+        let cell = rows[rowIndex].windows[windowIndex]
+        let newCell = RowWindow(
+            id: cell.id,
+            nestedContainer: container,
+            widthProportion: cell.widthProportion
+        )
+
+        // Force complete struct recreation for SwiftUI
+        var newWindows = rows[rowIndex].windows
+        newWindows[windowIndex] = newCell
+        let newRow = Row(
+            id: rows[rowIndex].id,
+            heightProportion: rows[rowIndex].heightProportion,
+            windows: newWindows
+        )
+        var newRows = rows
+        newRows[rowIndex] = newRow
+        rows = newRows
+
+        objectWillChange.send()
+        refreshAvailableWindows()
+
+        if isActive {
+            applyLayout()
+        }
+    }
+
+    /// Remove a window from a nested container within a column cell
+    func removeWindowFromColumnNested(columnIndex: Int, windowIndex: Int, nestedIndex: Int) {
+        guard columnIndex < columns.count else { return }
+        guard windowIndex < columns[columnIndex].windows.count else { return }
+        guard var container = columns[columnIndex].windows[windowIndex].nestedContainer else { return }
+        guard nestedIndex < container.children.count else { return }
+
+        container.children.remove(at: nestedIndex)
+        container.normalizeProportions()
+
+        // Force complete array reassignment for SwiftUI
+        var updatedColumns = columns
+        if container.children.isEmpty {
+            // Remove the entire cell if empty
+            updatedColumns[columnIndex].windows.remove(at: windowIndex)
+            // Normalize remaining proportions
+            let count = updatedColumns[columnIndex].windows.count
+            if count > 0 {
+                let newProportion = 1.0 / CGFloat(count)
+                for i in 0..<count {
+                    updatedColumns[columnIndex].windows[i].heightProportion = newProportion
+                }
+            }
+        } else if container.children.count == 1, case .window(let node) = container.children[0] {
+            // Convert back to a single window cell
+            updatedColumns[columnIndex].windows[windowIndex] = ColumnWindow(
+                id: updatedColumns[columnIndex].windows[windowIndex].id,
+                window: node.window,
+                heightProportion: updatedColumns[columnIndex].windows[windowIndex].heightProportion
+            )
+        } else {
+            updatedColumns[columnIndex].windows[windowIndex].nestedContainer = container
+        }
+        columns = updatedColumns
+
+        refreshAvailableWindows()
+
+        if isActive {
+            applyLayout()
+        }
+    }
+
+    /// Remove a window from a nested container within a row cell
+    func removeWindowFromRowNested(rowIndex: Int, windowIndex: Int, nestedIndex: Int) {
+        guard rowIndex < rows.count else { return }
+        guard windowIndex < rows[rowIndex].windows.count else { return }
+        guard var container = rows[rowIndex].windows[windowIndex].nestedContainer else { return }
+        guard nestedIndex < container.children.count else { return }
+
+        container.children.remove(at: nestedIndex)
+        container.normalizeProportions()
+
+        // Force complete array reassignment for SwiftUI
+        var updatedRows = rows
+        if container.children.isEmpty {
+            // Remove the entire cell if empty
+            updatedRows[rowIndex].windows.remove(at: windowIndex)
+            // Normalize remaining proportions
+            let count = updatedRows[rowIndex].windows.count
+            if count > 0 {
+                let newProportion = 1.0 / CGFloat(count)
+                for i in 0..<count {
+                    updatedRows[rowIndex].windows[i].widthProportion = newProportion
+                }
+            }
+        } else if container.children.count == 1, case .window(let node) = container.children[0] {
+            // Convert back to a single window cell
+            updatedRows[rowIndex].windows[windowIndex] = RowWindow(
+                id: updatedRows[rowIndex].windows[windowIndex].id,
+                window: node.window,
+                widthProportion: updatedRows[rowIndex].windows[windowIndex].widthProportion
+            )
+        } else {
+            updatedRows[rowIndex].windows[windowIndex].nestedContainer = container
+        }
+        rows = updatedRows
+
+        refreshAvailableWindows()
+
+        if isActive {
+            applyLayout()
+        }
+    }
+
+    /// Resize divider within a nested container in a column (using initial proportions)
+    func resizeNestedColumnDividerFromInitial(columnIndex: Int, windowIndex: Int, dividerIndex: Int, initialProp1: CGFloat, initialProp2: CGFloat, delta: CGFloat, containerSize: CGFloat) {
+        guard columnIndex < columns.count else { return }
+        guard windowIndex < columns[columnIndex].windows.count else { return }
+        guard var container = columns[columnIndex].windows[windowIndex].nestedContainer else { return }
+        guard dividerIndex < container.children.count - 1 else { return }
+
+        // Calculate proportional delta (scale factor for sensitivity)
+        let totalProportion = initialProp1 + initialProp2
+        let deltaProportion = (delta / containerSize) * totalProportion * 0.5
+        let minProportion: CGFloat = 0.1
+
+        var prop1 = initialProp1 + deltaProportion
+        var prop2 = initialProp2 - deltaProportion
+
+        // Clamp proportions
+        if prop1 < minProportion {
+            prop2 = totalProportion - minProportion
+            prop1 = minProportion
+        }
+        if prop2 < minProportion {
+            prop1 = totalProportion - minProportion
+            prop2 = minProportion
+        }
+
+        container.children[dividerIndex].proportion = prop1
+        container.children[dividerIndex + 1].proportion = prop2
+
+        // Force SwiftUI update
+        let cell = columns[columnIndex].windows[windowIndex]
+        let newCell = ColumnWindow(id: cell.id, nestedContainer: container, heightProportion: cell.heightProportion)
+        var newWindows = columns[columnIndex].windows
+        newWindows[windowIndex] = newCell
+        let newColumn = Column(id: columns[columnIndex].id, widthProportion: columns[columnIndex].widthProportion, windows: newWindows)
+        var newColumns = columns
+        newColumns[columnIndex] = newColumn
+        columns = newColumns
+
+        if isActive {
+            applyLayout()
+        }
+    }
+
+    /// Resize divider within a nested container in a row (using initial proportions)
+    func resizeNestedRowDividerFromInitial(rowIndex: Int, windowIndex: Int, dividerIndex: Int, initialProp1: CGFloat, initialProp2: CGFloat, delta: CGFloat, containerSize: CGFloat) {
+        guard rowIndex < rows.count else { return }
+        guard windowIndex < rows[rowIndex].windows.count else { return }
+        guard var container = rows[rowIndex].windows[windowIndex].nestedContainer else { return }
+        guard dividerIndex < container.children.count - 1 else { return }
+
+        // Calculate proportional delta (scale factor for sensitivity)
+        let totalProportion = initialProp1 + initialProp2
+        let deltaProportion = (delta / containerSize) * totalProportion * 0.5
+        let minProportion: CGFloat = 0.1
+
+        var prop1 = initialProp1 + deltaProportion
+        var prop2 = initialProp2 - deltaProportion
+
+        // Clamp proportions
+        if prop1 < minProportion {
+            prop2 = totalProportion - minProportion
+            prop1 = minProportion
+        }
+        if prop2 < minProportion {
+            prop1 = totalProportion - minProportion
+            prop2 = minProportion
+        }
+
+        container.children[dividerIndex].proportion = prop1
+        container.children[dividerIndex + 1].proportion = prop2
+
+        // Force SwiftUI update
+        let cell = rows[rowIndex].windows[windowIndex]
+        let newCell = RowWindow(id: cell.id, nestedContainer: container, widthProportion: cell.widthProportion)
+        var newWindows = rows[rowIndex].windows
+        newWindows[windowIndex] = newCell
+        let newRow = Row(id: rows[rowIndex].id, heightProportion: rows[rowIndex].heightProportion, windows: newWindows)
+        var newRows = rows
+        newRows[rowIndex] = newRow
+        rows = newRows
+
+        if isActive {
+            applyLayout()
+        }
     }
 
     // MARK: - Active Management
@@ -1736,13 +2291,13 @@ class WindowManager: ObservableObject {
         case .columns:
             for column in layout.columns {
                 for colWindow in column.windows {
-                    windows.append(colWindow.window)
+                    windows.append(contentsOf: colWindow.allWindows)
                 }
             }
         case .rows:
             for row in layout.rows {
                 for rowWindow in row.windows {
-                    windows.append(rowWindow.window)
+                    windows.append(contentsOf: rowWindow.allWindows)
                 }
             }
         }
@@ -1763,7 +2318,7 @@ class WindowManager: ObservableObject {
             for (colIndex, column) in layout.columns.enumerated() {
                 for (winIndex, colWindow) in column.windows.enumerated() {
                     // Check if this is the element that changed
-                    if CFEqual(colWindow.window.axElement, element) {
+                    if let window = colWindow.window, CFEqual(window.axElement, element) {
                         guard let expected = layout.expectedFrames[colWindow.id] else { continue }
                         let expectedAX = convertFrameToAXCoordinates(expected)
                         if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
@@ -1776,7 +2331,7 @@ class WindowManager: ObservableObject {
         case .rows:
             for (rowIndex, row) in layout.rows.enumerated() {
                 for (winIndex, rowWindow) in row.windows.enumerated() {
-                    if CFEqual(rowWindow.window.axElement, element) {
+                    if let window = rowWindow.window, CFEqual(window.axElement, element) {
                         guard let expected = layout.expectedFrames[rowWindow.id] else { continue }
                         let expectedAX = convertFrameToAXCoordinates(expected)
                         if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
@@ -1953,8 +2508,12 @@ class WindowManager: ObservableObject {
                     let windowHeight = isLastWindow ? (currentTop - bounds.minY) : (colWindow.heightProportion * bounds.height)
 
                     let frame = CGRect(x: currentX, y: currentTop - windowHeight, width: columnWidth, height: windowHeight)
-                    let constrained = constrainFrame(frame, for: colWindow.window)
-                    _ = colWindow.window.setFrame(constrained)
+                    if let window = colWindow.window {
+                        let constrained = constrainFrame(frame, for: window)
+                        _ = window.setFrame(constrained)
+                    } else if let container = colWindow.nestedContainer {
+                        applyNestedContainerLayout(container: container, in: frame)
+                    }
                     currentTop -= windowHeight
                 }
                 currentX += columnWidth
@@ -1972,8 +2531,12 @@ class WindowManager: ObservableObject {
                     let windowWidth = isLastWindow ? (bounds.maxX - currentX) : (rowWindow.widthProportion * bounds.width)
 
                     let frame = CGRect(x: currentX, y: currentTop - rowHeight, width: windowWidth, height: rowHeight)
-                    let constrained = constrainFrame(frame, for: rowWindow.window)
-                    _ = rowWindow.window.setFrame(constrained)
+                    if let window = rowWindow.window {
+                        let constrained = constrainFrame(frame, for: window)
+                        _ = window.setFrame(constrained)
+                    } else if let container = rowWindow.nestedContainer {
+                        applyNestedContainerLayout(container: container, in: frame)
+                    }
                     currentX += windowWidth
                 }
                 currentTop -= rowHeight
@@ -2022,8 +2585,11 @@ class WindowManager: ObservableObject {
                         height: windowHeight
                     )
                     // Constrain expected frame to window's min/max size to avoid perpetual sync
-                    expectedFrame = constrainFrame(expectedFrame, for: colWindow.window)
-                    layout.expectedFrames[colWindow.id] = expectedFrame
+                    if let window = colWindow.window {
+                        expectedFrame = constrainFrame(expectedFrame, for: window)
+                        layout.expectedFrames[colWindow.id] = expectedFrame
+                    }
+                    // TODO: Handle nested container expected frames
                     currentTop -= windowHeight
                 }
                 currentX += columnWidth
@@ -2063,8 +2629,11 @@ class WindowManager: ObservableObject {
                         height: rowHeight
                     )
                     // Constrain expected frame to window's min/max size to avoid perpetual sync
-                    expectedFrame = constrainFrame(expectedFrame, for: rowWindow.window)
-                    layout.expectedFrames[rowWindow.id] = expectedFrame
+                    if let window = rowWindow.window {
+                        expectedFrame = constrainFrame(expectedFrame, for: window)
+                        layout.expectedFrames[rowWindow.id] = expectedFrame
+                    }
+                    // TODO: Handle nested container expected frames
                     currentX += windowWidth
                 }
                 currentTop -= rowHeight
@@ -2099,30 +2668,38 @@ class WindowManager: ObservableObject {
         case .columns:
             for (colIndex, column) in layout.columns.enumerated() {
                 for colWindow in column.windows {
-                    // Only remove if we can't get the frame AND the process is dead
-                    // This prevents removing windows during sleep when AX calls timeout
-                    if ExternalWindow.getFrame(from: colWindow.window.axElement) == nil {
-                        let processExists = kill(colWindow.window.ownerPID, 0) == 0
-                        if !processExists {
-                            DispatchQueue.main.async { [weak self] in
-                                self?.removeWindow(colWindow.id, fromColumn: colIndex, in: layout)
+                    // Only check single windows, not nested containers
+                    if let window = colWindow.window {
+                        // Only remove if we can't get the frame AND the process is dead
+                        // This prevents removing windows during sleep when AX calls timeout
+                        if ExternalWindow.getFrame(from: window.axElement) == nil {
+                            let processExists = kill(window.ownerPID, 0) == 0
+                            if !processExists {
+                                DispatchQueue.main.async { [weak self] in
+                                    self?.removeWindow(colWindow.id, fromColumn: colIndex, in: layout)
+                                }
                             }
                         }
                     }
+                    // TODO: Check nested container windows
                 }
             }
         case .rows:
             for (rowIndex, row) in layout.rows.enumerated() {
                 for rowWindow in row.windows {
-                    // Only remove if we can't get the frame AND the process is dead
-                    if ExternalWindow.getFrame(from: rowWindow.window.axElement) == nil {
-                        let processExists = kill(rowWindow.window.ownerPID, 0) == 0
-                        if !processExists {
-                            DispatchQueue.main.async { [weak self] in
-                                self?.removeWindow(rowWindow.id, fromRow: rowIndex, in: layout)
+                    // Only check single windows, not nested containers
+                    if let window = rowWindow.window {
+                        // Only remove if we can't get the frame AND the process is dead
+                        if ExternalWindow.getFrame(from: window.axElement) == nil {
+                            let processExists = kill(window.ownerPID, 0) == 0
+                            if !processExists {
+                                DispatchQueue.main.async { [weak self] in
+                                    self?.removeWindow(rowWindow.id, fromRow: rowIndex, in: layout)
+                                }
                             }
                         }
                     }
+                    // TODO: Check nested container windows
                 }
             }
         }
@@ -2386,13 +2963,13 @@ class WindowManager: ObservableObject {
     /// Get evenly-spaced hue for an app name based on unique apps in current layout
     /// Uses caching to avoid expensive recalculation on every render
     func hueForApp(_ appName: String) -> Double {
-        // Get all unique app names in current layout
+        // Get all unique app names in current layout (including from nested containers)
         var allAppNames: [String] = []
         switch layoutMode {
         case .columns:
-            allAppNames = columns.flatMap { $0.windows.map { $0.window.ownerName } }
+            allAppNames = columns.flatMap { $0.windows.flatMap { $0.allWindows.map { $0.ownerName } } }
         case .rows:
-            allAppNames = rows.flatMap { $0.windows.map { $0.window.ownerName } }
+            allAppNames = rows.flatMap { $0.windows.flatMap { $0.allWindows.map { $0.ownerName } } }
         }
 
         // Check if cache is still valid (layout hasn't changed)
@@ -2547,14 +3124,18 @@ class WindowManager: ObservableObject {
             columns: layout.layoutMode == .columns ? layout.columns.map { col in
                 SavedColumn(
                     widthProportion: col.widthProportion,
-                    windows: col.windows.map { colWin in
-                        SavedWindowSlot(
-                            ownerName: colWin.window.ownerName,
-                            windowTitle: colWin.window.title,
-                            bundleIdentifier: AppLauncher.getBundleIdentifier(for: colWin.window.ownerName),
+                    windows: col.windows.compactMap { colWin -> SavedWindowSlot? in
+                        guard let window = colWin.window else {
+                            // TODO: Handle nested containers in saved layouts
+                            return nil
+                        }
+                        return SavedWindowSlot(
+                            ownerName: window.ownerName,
+                            windowTitle: window.title,
+                            bundleIdentifier: AppLauncher.getBundleIdentifier(for: window.ownerName),
                             proportion: colWin.heightProportion,
                             isPlaceholder: false,
-                            frame: colWin.window.frame  // Store frame for better matching
+                            frame: window.frame  // Store frame for better matching
                         )
                     }
                 )
@@ -2562,14 +3143,18 @@ class WindowManager: ObservableObject {
             rows: layout.layoutMode == .rows ? layout.rows.map { row in
                 SavedRow(
                     heightProportion: row.heightProportion,
-                    windows: row.windows.map { rowWin in
-                        SavedWindowSlot(
-                            ownerName: rowWin.window.ownerName,
-                            windowTitle: rowWin.window.title,
-                            bundleIdentifier: AppLauncher.getBundleIdentifier(for: rowWin.window.ownerName),
+                    windows: row.windows.compactMap { rowWin -> SavedWindowSlot? in
+                        guard let window = rowWin.window else {
+                            // TODO: Handle nested containers in saved layouts
+                            return nil
+                        }
+                        return SavedWindowSlot(
+                            ownerName: window.ownerName,
+                            windowTitle: window.title,
+                            bundleIdentifier: AppLauncher.getBundleIdentifier(for: window.ownerName),
                             proportion: rowWin.widthProportion,
                             isPlaceholder: false,
-                            frame: rowWin.window.frame  // Store frame for better matching
+                            frame: window.frame  // Store frame for better matching
                         )
                     }
                 )

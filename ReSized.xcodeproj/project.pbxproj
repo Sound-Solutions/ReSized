@@ -12,6 +12,7 @@
 		A1000001233300003 /* AccessibilityHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000001233300014 /* AccessibilityHelper.swift */; };
 		A1000001233300004 /* WindowManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000001233300015 /* WindowManager.swift */; };
 		A1000001233300005 /* LicenseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000001233300016 /* LicenseManager.swift */; };
+		A1000001233300006 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000001233300017 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -22,6 +23,7 @@
 		A1000001233300014 /* AccessibilityHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityHelper.swift; sourceTree = "<group>"; };
 		A1000001233300015 /* WindowManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowManager.swift; sourceTree = "<group>"; };
 		A1000001233300016 /* LicenseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LicenseManager.swift; sourceTree = "<group>"; };
+		A1000001233300017 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -51,6 +53,7 @@
 				A1000001233300014 /* AccessibilityHelper.swift */,
 				A1000001233300015 /* WindowManager.swift */,
 				A1000001233300016 /* LicenseManager.swift */,
+				A1000001233300017 /* Assets.xcassets */,
 				A1000001233300013 /* ReSized.entitlements */,
 			);
 			path = ReSized;
@@ -122,6 +125,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1000001233300006 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
