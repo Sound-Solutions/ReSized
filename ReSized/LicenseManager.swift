@@ -100,6 +100,17 @@ class LicenseManager: ObservableObject {
 
     // MARK: - License Validation
 
+    private let instanceIDKey = "ReSized_InstanceID"
+
+    private var instanceID: String? {
+        get { UserDefaults.standard.string(forKey: instanceIDKey) }
+        set { UserDefaults.standard.set(newValue, forKey: instanceIDKey) }
+    }
+
+    private func getInstanceName() -> String {
+        Host.current().localizedName ?? "Mac"
+    }
+
     func validateLicense(completion: @escaping (Bool, String?) -> Void) {
         guard !licenseKey.isEmpty else {
             completion(false, "Please enter a license key")
@@ -109,61 +120,140 @@ class LicenseManager: ObservableObject {
         isValidating = true
         validationError = nil
 
-        // TODO: Replace with actual Lemon Squeezy API call when store is live
-        // For now, this is a placeholder that simulates validation
+        // If we have an instance ID, validate it; otherwise activate
+        if let existingInstanceID = instanceID {
+            validateExistingLicense(instanceID: existingInstanceID, completion: completion)
+        } else {
+            activateLicense(completion: completion)
+        }
+    }
 
-        /*
-        Actual implementation will be:
-
-        let url = URL(string: "https://api.lemonsqueezy.com/v1/licenses/validate")!
+    private func activateLicense(completion: @escaping (Bool, String?) -> Void) {
+        let url = URL(string: "https://api.lemonsqueezy.com/v1/licenses/activate")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
-        let body = ["license_key": licenseKey]
-        request.httpBody = try? JSONEncoder().encode(body)
+        let bodyString = "license_key=\(licenseKey)&instance_name=\(getInstanceName().addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "Mac")"
+        request.httpBody = bodyString.data(using: .utf8)
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
                 self.isValidating = false
 
                 if let error = error {
-                    self.validationError = error.localizedDescription
-                    completion(false, error.localizedDescription)
+                    self.validationError = "Network error: \(error.localizedDescription)"
+                    completion(false, self.validationError)
                     return
                 }
 
-                guard let data = data,
-                      let result = try? JSONDecoder().decode(LemonSqueezyResponse.self, from: data) else {
-                    self.validationError = "Invalid response"
-                    completion(false, "Invalid response from server")
+                guard let data = data else {
+                    self.validationError = "No response from server"
+                    completion(false, self.validationError)
                     return
                 }
 
-                if result.valid {
-                    self.setLicenseValid(true)
-                    completion(true, nil)
-                } else {
-                    self.validationError = "Invalid license key"
-                    completion(false, "Invalid license key")
+                do {
+                    let result = try JSONDecoder().decode(LemonSqueezyActivationResponse.self, from: data)
+
+                    if result.activated {
+                        self.instanceID = result.instance?.id
+                        self.saveLicenseKey(self.licenseKey)
+                        self.setLicenseValid(true)
+                        completion(true, nil)
+                    } else {
+                        self.validationError = result.error ?? "Activation failed"
+                        completion(false, self.validationError)
+                    }
+                } catch {
+                    // Try to parse error response
+                    if let errorResponse = try? JSONDecoder().decode(LemonSqueezyErrorResponse.self, from: data) {
+                        self.validationError = errorResponse.error ?? "Invalid license key"
+                    } else {
+                        self.validationError = "Failed to parse response"
+                    }
+                    completion(false, self.validationError)
                 }
             }
         }.resume()
-        */
+    }
 
-        // Placeholder: simulate network delay and validation
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.isValidating = false
+    private func validateExistingLicense(instanceID: String, completion: @escaping (Bool, String?) -> Void) {
+        let url = URL(string: "https://api.lemonsqueezy.com/v1/licenses/validate")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
-            // For testing: accept any key that starts with "RESIZED-"
-            if self.licenseKey.uppercased().hasPrefix("RESIZED-") {
-                self.setLicenseValid(true)
-                completion(true, nil)
-            } else {
-                self.validationError = "Invalid license key (use RESIZED-XXXX for testing)"
-                completion(false, "Invalid license key")
+        let bodyString = "license_key=\(licenseKey)&instance_id=\(instanceID)"
+        request.httpBody = bodyString.data(using: .utf8)
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                self.isValidating = false
+
+                if let error = error {
+                    // Network error - allow offline use if previously validated
+                    if self.isLicensed {
+                        completion(true, nil)
+                    } else {
+                        self.validationError = "Network error: \(error.localizedDescription)"
+                        completion(false, self.validationError)
+                    }
+                    return
+                }
+
+                guard let data = data else {
+                    self.validationError = "No response from server"
+                    completion(false, self.validationError)
+                    return
+                }
+
+                do {
+                    let result = try JSONDecoder().decode(LemonSqueezyValidationResponse.self, from: data)
+
+                    if result.valid {
+                        self.setLicenseValid(true)
+                        completion(true, nil)
+                    } else {
+                        // License no longer valid - clear stored data
+                        self.instanceID = nil
+                        self.setLicenseValid(false)
+                        self.validationError = result.error ?? "License is no longer valid"
+                        completion(false, self.validationError)
+                    }
+                } catch {
+                    if let errorResponse = try? JSONDecoder().decode(LemonSqueezyErrorResponse.self, from: data) {
+                        self.validationError = errorResponse.error ?? "Validation failed"
+                    } else {
+                        self.validationError = "Failed to parse response"
+                    }
+                    completion(false, self.validationError)
+                }
             }
+        }.resume()
+    }
+
+    func deactivateLicense(completion: ((Bool) -> Void)? = nil) {
+        guard let existingInstanceID = instanceID, !licenseKey.isEmpty else {
+            completion?(true)
+            return
         }
+
+        let url = URL(string: "https://api.lemonsqueezy.com/v1/licenses/deactivate")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+        let bodyString = "license_key=\(licenseKey)&instance_id=\(existingInstanceID)"
+        request.httpBody = bodyString.data(using: .utf8)
+
+        URLSession.shared.dataTask(with: request) { _, _, _ in
+            DispatchQueue.main.async {
+                self.instanceID = nil
+                self.setLicenseValid(false)
+                completion?(true)
+            }
+        }.resume()
     }
 
     // MARK: - Purchase
@@ -180,36 +270,90 @@ class LicenseManager: ObservableObject {
         UserDefaults.standard.removeObject(forKey: trialStartKey)
         UserDefaults.standard.removeObject(forKey: licenseKeyKey)
         UserDefaults.standard.removeObject(forKey: licenseValidKey)
+        UserDefaults.standard.removeObject(forKey: instanceIDKey)
         initializeTrialIfNeeded()
         licenseKey = ""
         updateLicenseState()
     }
 }
 
-// MARK: - Lemon Squeezy Response (for future use)
+// MARK: - Lemon Squeezy API Responses
 
 struct LemonSqueezyValidationResponse: Codable {
     let valid: Bool
     let error: String?
-    let licenseKey: LicenseKeyData?
+    let licenseKey: LicenseKeyInfo?
+    let instance: InstanceInfo?
+    let meta: MetaInfo?
 
     enum CodingKeys: String, CodingKey {
-        case valid
-        case error
+        case valid, error, instance, meta
         case licenseKey = "license_key"
     }
 }
 
-struct LicenseKeyData: Codable {
+struct LemonSqueezyActivationResponse: Codable {
+    let activated: Bool
+    let error: String?
+    let licenseKey: LicenseKeyInfo?
+    let instance: InstanceInfo?
+    let meta: MetaInfo?
+
+    enum CodingKeys: String, CodingKey {
+        case activated, error, instance, meta
+        case licenseKey = "license_key"
+    }
+}
+
+struct LemonSqueezyErrorResponse: Codable {
+    let error: String?
+}
+
+struct LicenseKeyInfo: Codable {
     let id: Int
     let status: String
     let key: String
-    let activationLimit: Int?
-    let activationsCount: Int?
+    let activationLimit: Int
+    let activationUsage: Int
+    let expiresAt: String?
 
     enum CodingKeys: String, CodingKey {
         case id, status, key
         case activationLimit = "activation_limit"
-        case activationsCount = "activations_count"
+        case activationUsage = "activation_usage"
+        case expiresAt = "expires_at"
+    }
+}
+
+struct InstanceInfo: Codable {
+    let id: String
+    let name: String
+    let createdAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case createdAt = "created_at"
+    }
+}
+
+struct MetaInfo: Codable {
+    let storeId: Int?
+    let productId: Int?
+    let productName: String?
+    let variantId: Int?
+    let variantName: String?
+    let customerId: Int?
+    let customerName: String?
+    let customerEmail: String?
+
+    enum CodingKeys: String, CodingKey {
+        case storeId = "store_id"
+        case productId = "product_id"
+        case productName = "product_name"
+        case variantId = "variant_id"
+        case variantName = "variant_name"
+        case customerId = "customer_id"
+        case customerName = "customer_name"
+        case customerEmail = "customer_email"
     }
 }
