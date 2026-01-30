@@ -1,0 +1,93 @@
+2025-12-31 03:58:45 +0000 [MT] Initial pipeline context: <IDEDistributionProcessingPipelineContext: 0x134621b70; archive(resolved)="<IDEArchive: 0x6000000923e0>", distributionTask(resolved)="2", distributionDestination(resolved)="1", distributionMethod(resolved)="<IDEDistributionMethodDeveloperID: 0x6000029deff0>", team(resolved)="<IDEProvisioningBasicTeam: 0x600002aedea0; teamID='M22XX2CSAY', teamName='(null)'>">
+	Chain (12, self inclusive):
+	<IDEDistributionProcessingPipelineContext: 0x134621b70; archive = "<IDEArchive: 0x6000000923e0>", distributionMethod="<IDEDistributionMethodDeveloperID: 0x6000029deff0>", team="<IDEProvisioningBasicTeam: 0x600002aedea0; teamID='M22XX2CSAY', teamName='(null)'>">
+	<IDEDistributionProcessingPipelineContext: 0x1346214c0; archive = "<IDEArchive: 0x6000000923e0>", distributionMethod="<IDEDistributionMethodDeveloperID: 0x6000029deff0>", team="<IDEProvisioningBasicTeam: 0x600002aedea0; teamID='M22XX2CSAY', teamName='(null)'>">
+	<IDEDistributionContext: 0x1346212b0; archive = "<IDEArchive: 0x6000000923e0>", distributionMethod="<IDEDistributionMethodDeveloperID: 0x6000029deff0>", team="<IDEProvisioningBasicTeam: 0x600002aedea0; teamID='M22XX2CSAY', teamName='(null)'>">
+	<IDEDistributionContext: 0x135111100; archive = "<IDEArchive: 0x6000000923e0>", distributionMethod="<IDEDistributionMethodDeveloperID: 0x6000029deff0>", team="<IDEProvisioningBasicTeam: 0x600002aedea0; teamID='M22XX2CSAY', teamName='(null)'>">
+	<IDEDistributionContext: 0x13510ca30; archive = "<IDEArchive: 0x6000000923e0>", distributionMethod="<IDEDistributionMethodDeveloperID: 0x6000029deff0>", team="<IDEProvisioningBasicTeam: 0x600002aedea0; teamID='M22XX2CSAY', teamName='(null)'>">
+	<IDEDistributionContext: 0x1350248e0; archive = "<IDEArchive: 0x6000000923e0>", distributionMethod="<IDEDistributionMethodDeveloperID: 0x6000029deff0>", team="<IDEProvisioningBasicTeam: 0x600002aedea0; teamID='M22XX2CSAY', teamName='(null)'>">
+	<IDEDistributionContext: 0x1350307f0; archive = "<IDEArchive: 0x6000000923e0>", distributionMethod="<IDEDistributionMethodDeveloperID: 0x6000029deff0>", team="<IDEProvisioningBasicTeam: 0x600002aedea0; teamID='M22XX2CSAY', teamName='(null)'>">
+	<IDEDistributionContext: 0x1350207d0; archive = "<IDEArchive: 0x6000000923e0>", distributionMethod="<IDEDistributionMethodDeveloperID: 0x6000029deff0>", team="<IDEProvisioningBasicTeam: 0x600002aedea0; teamID='M22XX2CSAY', teamName='(null)'>">
+	<IDEDistributionContext: 0x124616d70; archive = "<IDEArchive: 0x6000000923e0>", distributionMethod="<IDEDistributionMethodDeveloperID: 0x6000029deff0>", team="<IDEProvisioningBasicTeam: 0x600002aedea0; teamID='M22XX2CSAY', teamName='(null)'>">
+	<IDEDistributionContext: 0x124616780; archive = "<IDEArchive: 0x6000000923e0>", distributionMethod="<IDEDistributionMethodDeveloperID: 0x6000029deff0>", team="(null)">
+	<IDEDistributionContext: 0x134704920; archive = "<IDEArchive: 0x6000000923e0>", distributionMethod="<IDEDistributionMethodDeveloperID: 0x6000029deff0>", team="(null)">
+	<IDEDistributionContext: 0x1246149f0; archive = "<IDEArchive: 0x6000000923e0>", distributionMethod="(null)", team="(null)">
+</IDEDistributionProcessingPipelineContext: 0x134621b70>
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionCreateDestRootStep
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionCopyItemStep
+2025-12-31 03:58:45 +0000 [MT] Running /usr/bin/ditto '-V' '/Users/ksellarsm4lt/Documents/ReSized-Export/ReSized.xcarchive/Products/Applications/ReSized.app' '/var/folders/c1/2wb_s73x4qs8960cf1njvv880000gn/T/XcodeDistPipeline.~~~7FMMMo/Root/Applications/ReSized.app'
+2025-12-31 03:58:45 +0000  >>> Copying /Users/ksellarsm4lt/Documents/ReSized-Export/ReSized.xcarchive/Products/Applications/ReSized.app 
+2025-12-31 03:58:45 +0000  copying file ./Contents/_CodeSignature/CodeResources ... 
+2025-12-31 03:58:45 +0000  2672 bytes for ./Contents/_CodeSignature/CodeResources
+2025-12-31 03:58:45 +0000  copying file ./Contents/MacOS/ReSized ... 
+2025-12-31 03:58:45 +0000  785568 bytes for ./Contents/MacOS/ReSized
+2025-12-31 03:58:45 +0000  copying file ./Contents/Resources/AppIcon.icns ... 
+2025-12-31 03:58:45 +0000  6391 bytes for ./Contents/Resources/AppIcon.icns
+2025-12-31 03:58:45 +0000  copying file ./Contents/Resources/Assets.car ... 
+2025-12-31 03:58:45 +0000  63208 bytes for ./Contents/Resources/Assets.car
+2025-12-31 03:58:45 +0000  copying file ./Contents/Info.plist ... 
+2025-12-31 03:58:45 +0000  1415 bytes for ./Contents/Info.plist
+2025-12-31 03:58:45 +0000  copying file ./Contents/PkgInfo ... 
+2025-12-31 03:58:45 +0000  8 bytes for ./Contents/PkgInfo
+2025-12-31 03:58:45 +0000 [MT] /usr/bin/ditto exited with 0
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionEmbedProfileStep
+2025-12-31 03:58:45 +0000 [MT] Skipping profile for item: <IDEDistributionItem: 0x600000f2d3e0; bundleID='com.resized.ReSized', path='<DVTFilePath:0x600000f391a0:'/Users/ksellarsm4lt/Documents/ReSized-Export/ReSized.xcarchive/Products/Applications/ReSized.app'>', codeSigningInfo='<_DVTCodeSigningInformation_Path: 0x600000f39ce0; isSigned='1', isAdHocSigned='1', signingCertificate='(null)', entitlements='{
+    "com.apple.security.app-sandbox" = 0;
+}', teamID='(null)', identifier='com.resized.ReSized', executablePath='<DVTFilePath:0x600000fc32a0:'/Users/ksellarsm4lt/Documents/ReSized-Export/ReSized.xcarchive/Products/Applications/ReSized.app/Contents/MacOS/ReSized'>', hardenedRuntime='1'>'>
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionInfoPlistStep
+2025-12-31 03:58:45 +0000 [MT] Skipping step: IDEDistributionInfoPlistStep because it said so
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionAppThinningPlistStep
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionSymbolsStep
+2025-12-31 03:58:45 +0000 [MT] Skipping step: IDEDistributionSymbolsStep because it said so
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionAppThinningStep
+2025-12-31 03:58:45 +0000 [MT] Skipping step: IDEDistributionAppThinningStep because it said so
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionArchThinningStep
+2025-12-31 03:58:45 +0000 [MT] Item /Users/ksellarsm4lt/Documents/ReSized-Export/ReSized.xcarchive/Products/Applications/ReSized.app doesn't have the entitlement com.apple.developer.web-browser-engine.host enabled, returning ["arm64e"]
+2025-12-31 03:58:45 +0000 [MT] Archs to thin for item /Users/ksellarsm4lt/Documents/ReSized-Export/ReSized.xcarchive/Products/Applications/ReSized.app are ["arm64e"]
+2025-12-31 03:58:45 +0000 [MT] Running /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/lipo '/var/folders/c1/2wb_s73x4qs8960cf1njvv880000gn/T/XcodeDistPipeline.~~~7FMMMo/Root/Applications/ReSized.app/Contents/MacOS/ReSized' '-verify_arch' 'arm64e'
+2025-12-31 03:58:45 +0000 [MT] /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/lipo exited with 1
+2025-12-31 03:58:45 +0000 [MT] Skipping architecture thinning for item "ReSized" because arch "arm64e" wasn't found
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionODRStep
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionStripXattrsStep
+2025-12-31 03:58:45 +0000 [MT] Skipping stripping extended attributes because the codesign step will strip them.
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionCodesignStep
+2025-12-31 03:58:45 +0000 [MT] Entitlements for <IDEDistributionItem: 0x600000f2d3e0; bundleID='com.resized.ReSized', path='<DVTFilePath:0x600000f391a0:'/Users/ksellarsm4lt/Documents/ReSized-Export/ReSized.xcarchive/Products/Applications/ReSized.app'>', codeSigningInfo='<_DVTCodeSigningInformation_Path: 0x600000f39ce0; isSigned='1', isAdHocSigned='1', signingCertificate='(null)', entitlements='{
+    "com.apple.security.app-sandbox" = 0;
+}', teamID='(null)', identifier='com.resized.ReSized', executablePath='<DVTFilePath:0x600000fc32a0:'/Users/ksellarsm4lt/Documents/ReSized-Export/ReSized.xcarchive/Products/Applications/ReSized.app/Contents/MacOS/ReSized'>', hardenedRuntime='1'>'>: {
+    "com.apple.security.app-sandbox" = 0;
+}
+2025-12-31 03:58:45 +0000 [MT] Associated App Clip Identifiers Filter: Skipping because "com.apple.developer.associated-appclip-app-identifiers" is not present
+2025-12-31 03:58:45 +0000 [MT] Entitlements for <IDEDistributionItem: 0x600000f2d3e0; bundleID='com.resized.ReSized', path='<DVTFilePath:0x600000f391a0:'/Users/ksellarsm4lt/Documents/ReSized-Export/ReSized.xcarchive/Products/Applications/ReSized.app'>', codeSigningInfo='<_DVTCodeSigningInformation_Path: 0x600000f39ce0; isSigned='1', isAdHocSigned='1', signingCertificate='(null)', entitlements='{
+    "com.apple.security.app-sandbox" = 0;
+}', teamID='(null)', identifier='com.resized.ReSized', executablePath='<DVTFilePath:0x600000fc32a0:'/Users/ksellarsm4lt/Documents/ReSized-Export/ReSized.xcarchive/Products/Applications/ReSized.app/Contents/MacOS/ReSized'>', hardenedRuntime='1'>'> are: {
+    "com.apple.security.app-sandbox" = 0;
+}
+2025-12-31 03:58:45 +0000 [MT] Writing entitlements for <IDEDistributionItem: 0x600000f2d3e0; bundleID='com.resized.ReSized', path='<DVTFilePath:0x600000f391a0:'/Users/ksellarsm4lt/Documents/ReSized-Export/ReSized.xcarchive/Products/Applications/ReSized.app'>', codeSigningInfo='<_DVTCodeSigningInformation_Path: 0x600000f39ce0; isSigned='1', isAdHocSigned='1', signingCertificate='(null)', entitlements='{
+    "com.apple.security.app-sandbox" = 0;
+}', teamID='(null)', identifier='com.resized.ReSized', executablePath='<DVTFilePath:0x600000fc32a0:'/Users/ksellarsm4lt/Documents/ReSized-Export/ReSized.xcarchive/Products/Applications/ReSized.app/Contents/MacOS/ReSized'>', hardenedRuntime='1'>'> to: /var/folders/c1/2wb_s73x4qs8960cf1njvv880000gn/T/XcodeDistPipeline.~~~7FMMMo/entitlements~~~mrfgDE
+2025-12-31 03:58:45 +0000 [MT] invoking codesign: <NSConcreteTask: 0x600000b86800; launchPath='/usr/bin/codesign', arguments='(
+    "-f",
+    "-s",
+    CE39B57E060352E93128BC697D4EA73A4DB37AAE,
+    "--entitlements",
+    "/var/folders/c1/2wb_s73x4qs8960cf1njvv880000gn/T/XcodeDistPipeline.~~~7FMMMo/entitlements~~~mrfgDE",
+    "--requirements",
+    "=designated => anchor apple generic  and identifier \"$self.identifier\" and ((cert leaf[field.1.2.840.113635.100.6.1.9] exists) or ( certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists  and certificate leaf[subject.OU] = \"M22XX2CSAY\" ))",
+    "--preserve-metadata=identifier,flags,runtime",
+    "--generate-entitlement-der",
+    "--strip-disallowed-xattrs",
+    "-vvv",
+    "/var/folders/c1/2wb_s73x4qs8960cf1njvv880000gn/T/XcodeDistPipeline.~~~7FMMMo/Root/Applications/ReSized.app"
+)'>
+2025-12-31 03:58:45 +0000 [MT] codesign output: /var/folders/c1/2wb_s73x4qs8960cf1njvv880000gn/T/XcodeDistPipeline.~~~7FMMMo/Root/Applications/ReSized.app: replacing existing signature
+/var/folders/c1/2wb_s73x4qs8960cf1njvv880000gn/T/XcodeDistPipeline.~~~7FMMMo/Root/Applications/ReSized.app: signed app bundle with Mach-O thin (arm64) [com.resized.ReSized]
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionZipODRItemStep
+2025-12-31 03:58:45 +0000 [MT] Skipping step: IDEDistributionZipODRItemStep because it said so
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionSkipPackagingStep
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionAppStoreInformationStep
+2025-12-31 03:58:45 +0000 [MT] Skipping step: IDEDistributionAppStoreInformationStep because it said so
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionGenerateProcessedDistributionItems
+2025-12-31 03:58:45 +0000 [MT] IDEDistributionItem init <DVTFilePath:0x600000f10840:'/var/folders/c1/2wb_s73x4qs8960cf1njvv880000gn/T/XcodeDistPipeline.~~~7FMMMo/Root/Applications/ReSized.app'>
+2025-12-31 03:58:45 +0000 [MT] [OPTIONAL] Didn't find embedded provisioning profile for <DVTFilePath:0x600000f10840:'/var/folders/c1/2wb_s73x4qs8960cf1njvv880000gn/T/XcodeDistPipeline.~~~7FMMMo/Root/Applications/ReSized.app'>: Error Domain=NSCocoaErrorDomain Code=4 "No file at <DVTFilePath:0x60000001c850:'/var/folders/c1/2wb_s73x4qs8960cf1njvv880000gn/T/XcodeDistPipeline.~~~7FMMMo/Root/Applications/ReSized.app/Contents/embedded.provisionprofile'>" UserInfo={NSLocalizedDescription=No file at <DVTFilePath:0x60000001c850:'/var/folders/c1/2wb_s73x4qs8960cf1njvv880000gn/T/XcodeDistPipeline.~~~7FMMMo/Root/Applications/ReSized.app/Contents/embedded.provisionprofile'>}
+2025-12-31 03:58:45 +0000 [MT] Processing step: IDEDistributionCreateManifestStep
+2025-12-31 03:58:45 +0000 [MT] Skipping step: IDEDistributionCreateManifestStep because it said so
