@@ -56,6 +56,14 @@ class MonitorRingView: NSView {
 
 /// A window placed in a column with its height proportion within that column
 struct ColumnWindow: Identifiable, Equatable {
+    /// The cell's own identity, deliberately not the window's.
+    ///
+    /// These used to be the same id. Splitting a cell keeps the cell's id while
+    /// moving its window down into the split, so the moment that window was
+    /// pulled back out and placed somewhere else, two cells carried the same
+    /// id. ForEach then treated them as one — splitting a cell in one column
+    /// appeared to split a cell in another — and removeAll(where: id) deleted
+    /// both.
     let id: UUID
     var window: ExternalWindow?  // nil if using nestedContainer
     var nestedContainer: LayoutContainer?  // For nested splits within this cell
@@ -125,6 +133,8 @@ enum LayoutMode: String, CaseIterable {
 
 /// A window placed in a row with its width proportion within that row
 struct RowWindow: Identifiable, Equatable {
+    /// The cell's own identity — see ColumnWindow.id for why it is not the
+    /// window's.
     let id: UUID
     var window: ExternalWindow?  // nil if using nestedContainer
     var nestedContainer: LayoutContainer?  // For nested splits within this cell
@@ -1102,7 +1112,6 @@ class WindowManager {
             for window in sortedByY {
                 let heightProportion = window.frame.height / totalHeight
                 let colWindow = ColumnWindow(
-                    id: window.id,
                     window: window,
                     heightProportion: heightProportion
                 )
@@ -1168,7 +1177,6 @@ class WindowManager {
             for window in sortedByX {
                 let widthProportion = window.frame.width / totalWidth
                 let rowWindow = RowWindow(
-                    id: window.id,
                     window: window,
                     widthProportion: widthProportion
                 )
@@ -1272,7 +1280,6 @@ class WindowManager {
 
         // Add new window
         let columnWindow = ColumnWindow(
-            id: window.id,
             window: window,
             heightProportion: newProportion
         )
@@ -1405,7 +1412,6 @@ class WindowManager {
 
         // Add new window
         let rowWindow = RowWindow(
-            id: window.id,
             window: window,
             widthProportion: newProportion
         )
