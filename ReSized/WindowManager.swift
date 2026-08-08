@@ -1085,19 +1085,17 @@ class WindowManager {
         // picker, and switching mode empties the layout, which would otherwise
         // make the next scan undo the choice.
         if autoSelectMode {
+            // Taken from the arrangement's own first cut rather than a separate
+            // heuristic. The two disagreeing is worse than either being wrong:
+            // the scan then wraps the whole arrangement in a single primary
+            // division to honour the mode, and everything lands in one column.
             let tiled = filterTiledWindows(windowsOnMonitor, monitorFrame: monitorFrameAX)
-            if let best = Self.bestFittingLayoutMode(for: tiled, monitorFrameAX: monitorFrameAX) {
-                layoutMode = best
+            if case .split(let vertical, _) = Self.decompose(tiled) {
+                layoutMode = vertical ? .columns : .rows
             }
         }
 
-        // Scan based on current layout mode
-        switch layoutMode {
-        case .columns:
-            scanAsColumns(windowsOnMonitor, monitor: monitor)
-        case .rows:
-            scanAsRows(windowsOnMonitor, monitor: monitor)
-        }
+        applyScannedArrangement(windowsOnMonitor, monitor: monitor, asColumns: layoutMode == .columns)
 
         appState = .configuring
         refreshAvailableWindows()
@@ -1105,134 +1103,222 @@ class WindowManager {
         return true
     }
 
-    /// Scan windows as column-based layout
-    private func scanAsColumns(_ windowsOnMonitor: [ExternalWindow], monitor: Monitor) {
-        // Convert monitor frame to AX coordinates for edge detection
-        let monitorFrameAX = convertFrameToAXCoordinates(monitor.frame)
+    // MARK: - Reading an Arrangement
 
-        // Filter to tiled windows only (excludes floating windows)
-        let tiledWindows = filterTiledWindows(windowsOnMonitor, monitorFrame: monitorFrameAX)
-
-        // Determine column count from max horizontal windows at any Y
-        let columnCount = Self.maxWindowsHorizontally(tiledWindows)
-
-        guard columnCount > 0 else {
-            columns = []
-            return
-        }
-
-        let columnGroups = Self.groupIntoColumns(tiledWindows, monitorFrameAX: monitorFrameAX)
-
-        // Build columns with proportions
-        let totalWidth = monitor.frame.width
-        var newColumns: [Column] = []
-
-        for group in columnGroups {
-            // Sort windows in column by Y (top to bottom in AX coords)
-            let sortedByY = group.sorted { $0.frame.minY < $1.frame.minY }
-
-            // Calculate column width from average of windows in this column
-            let avgWidth = group.reduce(0) { $0 + $1.frame.width } / CGFloat(group.count)
-            let widthProportion = avgWidth / totalWidth
-
-            // Build windows with height proportions
-            let totalHeight = monitor.frame.height
-            var columnWindows: [ColumnWindow] = []
-
-            for window in sortedByY {
-                let heightProportion = window.frame.height / totalHeight
-                let colWindow = ColumnWindow(
-                    window: window,
-                    heightProportion: heightProportion
-                )
-                columnWindows.append(colWindow)
-            }
-
-            // Normalize height proportions within column
-            let heightSum = columnWindows.reduce(0) { $0 + $1.heightProportion }
-            if heightSum > 0 {
-                for i in 0..<columnWindows.count {
-                    columnWindows[i].heightProportion /= heightSum
-                }
-            }
-
-            newColumns.append(Column(widthProportion: widthProportion, windows: columnWindows))
-        }
-
-        // Normalize column width proportions
-        let widthSum = newColumns.reduce(0) { $0 + $1.widthProportion }
-        if widthSum > 0 {
-            for i in 0..<newColumns.count {
-                newColumns[i].widthProportion /= widthSum
-            }
-        }
-
-        columns = newColumns
+    /// A window arrangement broken down into nested splits.
+    ///
+    /// The scanner used to sort windows into columns and stack each one, which
+    /// can only ever describe a grid running in a single direction. Anything
+    /// with a split in it — two windows side by side filling the lower half of
+    /// a column — had nowhere to go, so the split was lost and its windows came
+    /// back as ordinary stacked cells at the wrong sizes.
+    indirect enum ScanNode {
+        case window(ExternalWindow)
+        /// Children in order: left to right when vertical, top to bottom when
+        /// not.
+        case split(vertical: Bool, children: [ScanNode])
+        /// Windows that overlap, so no straight cut separates them.
+        case tangle([ExternalWindow])
     }
 
-    /// Scan windows as row-based layout
-    private func scanAsRows(_ windowsOnMonitor: [ExternalWindow], monitor: Monitor) {
-        // Convert monitor frame to AX coordinates for edge detection
-        let monitorFrameAX = convertFrameToAXCoordinates(monitor.frame)
+    /// Break an arrangement into nested splits by repeatedly cutting it where
+    /// there is a clean gap running all the way across.
+    ///
+    /// Cutting every gap in one direction at once means the children of a
+    /// vertical cut can never be separated vertically again — so the directions
+    /// alternate on their own, without being told to.
+    static func decompose(_ windows: [ExternalWindow]) -> ScanNode {
+        guard windows.count > 1 else {
+            return windows.first.map { ScanNode.window($0) } ?? .tangle([])
+        }
 
-        // Filter to tiled windows only (excludes floating windows)
+        if let groups = separate(windows, vertical: true) {
+            return .split(vertical: true, children: groups.map(decompose))
+        }
+        if let groups = separate(windows, vertical: false) {
+            return .split(vertical: false, children: groups.map(decompose))
+        }
+        // Overlapping windows. Nothing here describes a tiling, so the caller
+        // lays them out in a stack rather than inventing a structure.
+        return .tangle(windows)
+    }
+
+    /// Split a set of windows at every gap that no window straddles, or nil if
+    /// there is no such gap.
+    private static func separate(_ windows: [ExternalWindow], vertical: Bool) -> [[ExternalWindow]]? {
+        // AX coordinates put minY at the top, so sorting ascending is
+        // left-to-right or top-to-bottom either way.
+        let sorted = windows.sorted {
+            vertical ? $0.frame.minX < $1.frame.minX : $0.frame.minY < $1.frame.minY
+        }
+        guard let first = sorted.first else { return nil }
+
+        var groups: [[ExternalWindow]] = []
+        var current = [first]
+        var edge = vertical ? first.frame.maxX : first.frame.maxY
+
+        for window in sorted.dropFirst() {
+            let start = vertical ? window.frame.minX : window.frame.minY
+            if start >= edge - edgeTolerance {
+                groups.append(current)
+                current = [window]
+                edge = vertical ? window.frame.maxX : window.frame.maxY
+            } else {
+                current.append(window)
+                edge = max(edge, vertical ? window.frame.maxX : window.frame.maxY)
+            }
+        }
+        groups.append(current)
+
+        return groups.count > 1 ? groups : nil
+    }
+
+    /// Every window under a node, in order.
+    static func leaves(of node: ScanNode) -> [ExternalWindow] {
+        switch node {
+        case .window(let window): return [window]
+        case .tangle(let windows): return windows
+        case .split(_, let children): return children.flatMap(leaves)
+        }
+    }
+
+    /// The area a node covers.
+    static func bounds(of node: ScanNode) -> CGRect {
+        leaves(of: node).reduce(nil) { (accumulated: CGRect?, window) in
+            accumulated.map { $0.union(window.frame) } ?? window.frame
+        } ?? .zero
+    }
+
+    /// Turn a scanned arrangement into a layout.
+    ///
+    /// Both modes share this: only the axis the primary divisions run along
+    /// differs, and the tree already knows its own shape.
+    private func applyScannedArrangement(_ windowsOnMonitor: [ExternalWindow], monitor: Monitor, asColumns: Bool) {
+        let monitorFrameAX = convertFrameToAXCoordinates(monitor.frame)
         let tiledWindows = filterTiledWindows(windowsOnMonitor, monitorFrame: monitorFrameAX)
 
-        // Determine row count from max vertical windows at any X
-        let rowCount = Self.maxWindowsVertically(tiledWindows)
-
-        guard rowCount > 0 else {
-            rows = []
+        guard !tiledWindows.isEmpty else {
+            if asColumns { columns = [] } else { rows = [] }
             return
         }
 
-        let rowGroups = Self.groupIntoRows(tiledWindows, monitorFrameAX: monitorFrameAX)
+        var tree = Self.decompose(tiledWindows)
 
-        // Build rows with proportions
-        let totalHeight = monitor.frame.height
-        var newRows: [Row] = []
+        // The arrangement decides its own first cut, which may not run the way
+        // the chosen mode does. Wrapping it in a single primary division keeps
+        // the mode the user asked for without misreading the arrangement.
+        if case .split(let vertical, _) = tree, vertical != asColumns {
+            tree = .split(vertical: asColumns, children: [tree])
+        } else if case .window = tree {
+            tree = .split(vertical: asColumns, children: [tree])
+        } else if case .tangle = tree {
+            tree = .split(vertical: asColumns, children: [tree])
+        }
 
-        for group in rowGroups {
-            // Sort windows in row by X (left to right)
-            let sortedByX = group.sorted { $0.frame.minX < $1.frame.minX }
+        guard case .split(_, let primaries) = tree else { return }
+        let area = Self.bounds(of: tree)
 
-            // Calculate row height from average of windows in this row
-            let avgHeight = group.reduce(0) { $0 + $1.frame.height } / CGFloat(group.count)
-            let heightProportion = avgHeight / totalHeight
-
-            // Build windows with width proportions
-            let totalWidth = monitor.frame.width
-            var rowWindows: [RowWindow] = []
-
-            for window in sortedByX {
-                let widthProportion = window.frame.width / totalWidth
-                let rowWindow = RowWindow(
-                    window: window,
-                    widthProportion: widthProportion
+        if asColumns {
+            columns = primaries.map { primary in
+                Column(
+                    widthProportion: share(Self.bounds(of: primary).width, of: area.width),
+                    windows: columnCells(from: primary, area: area)
                 )
-                rowWindows.append(rowWindow)
             }
-
-            // Normalize width proportions within row
-            let widthSum = rowWindows.reduce(0) { $0 + $1.widthProportion }
-            if widthSum > 0 {
-                for i in 0..<rowWindows.count {
-                    rowWindows[i].widthProportion /= widthSum
-                }
+            normalizeColumnProportions()
+            for index in columns.indices { normalizeWindowProportions(inColumn: index) }
+        } else {
+            rows = primaries.map { primary in
+                Row(
+                    heightProportion: share(Self.bounds(of: primary).height, of: area.height),
+                    windows: rowCells(from: primary, area: area)
+                )
             }
+            normalizeRowProportions()
+            for index in rows.indices { normalizeWindowProportions(inRow: index) }
+        }
+    }
 
-            newRows.append(Row(heightProportion: heightProportion, windows: rowWindows))
+    private func share(_ part: CGFloat, of whole: CGFloat) -> CGFloat {
+        whole > 0 ? max(0.01, part / whole) : 0
+    }
+
+    /// The cells stacked inside one column, and any split each one holds.
+    private func columnCells(from primary: ScanNode, area: CGRect) -> [ColumnWindow] {
+        let stacked: [ScanNode]
+        switch primary {
+        case .split(let vertical, let children) where !vertical: stacked = children
+        case .tangle(let windows): stacked = windows.map { .window($0) }
+        default: stacked = [primary]
         }
 
-        // Normalize row height proportions
-        let heightSum = newRows.reduce(0) { $0 + $1.heightProportion }
-        if heightSum > 0 {
-            for i in 0..<newRows.count {
-                newRows[i].heightProportion /= heightSum
+        return stacked.map { cell in
+            let height = share(Self.bounds(of: cell).height, of: area.height)
+            if case .window(let window) = cell {
+                return ColumnWindow(window: window, heightProportion: height)
             }
+            // Anything else subdivides again, which is a split within the cell.
+            // The model holds one level of that, so a deeper arrangement is
+            // flattened into it rather than dropped.
+            return ColumnWindow(
+                nestedContainer: splitContainer(from: cell, direction: .horizontal),
+                heightProportion: height
+            )
+        }
+    }
+
+    private func rowCells(from primary: ScanNode, area: CGRect) -> [RowWindow] {
+        let sideBySide: [ScanNode]
+        switch primary {
+        case .split(let vertical, let children) where vertical: sideBySide = children
+        case .tangle(let windows): sideBySide = windows.map { .window($0) }
+        default: sideBySide = [primary]
         }
 
-        rows = newRows
+        return sideBySide.map { cell in
+            let width = share(Self.bounds(of: cell).width, of: area.width)
+            if case .window(let window) = cell {
+                return RowWindow(window: window, widthProportion: width)
+            }
+            return RowWindow(
+                nestedContainer: splitContainer(from: cell, direction: .vertical),
+                widthProportion: width
+            )
+        }
+    }
+
+    /// Build a cell's split from a node that divides further.
+    private func splitContainer(from node: ScanNode, direction fallback: SplitDirection) -> LayoutContainer {
+        let direction: SplitDirection
+        let parts: [ScanNode]
+        if case .split(let vertical, let children) = node {
+            direction = vertical ? .horizontal : .vertical
+            parts = children
+        } else {
+            direction = fallback
+            parts = Self.leaves(of: node).map { .window($0) }
+        }
+
+        let area = Self.bounds(of: node)
+        var container = LayoutContainer(direction: direction, children: parts.map { part in
+            let partArea = Self.bounds(of: part)
+            let proportion = direction == .horizontal
+                ? share(partArea.width, of: area.width)
+                : share(partArea.height, of: area.height)
+            // A pane that subdivides again is one level too deep for the model,
+            // so its windows are laid side by side in this split instead.
+            let window = Self.leaves(of: part).first
+            return window.map { LayoutWindowNode(window: $0, proportion: proportion) }
+        }.compactMap { $0 })
+
+        // Panes lost to that flattening are appended so no window disappears.
+        let kept = Set(container.children.map(\.window.id))
+        for window in Self.leaves(of: node) where !kept.contains(window.id) {
+            container.children.append(LayoutWindowNode(window: window, proportion: 0.25))
+        }
+
+        container.normalizeProportions()
+        return container
     }
 
     /// Reset to setup state
