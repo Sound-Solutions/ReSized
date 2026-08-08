@@ -2117,7 +2117,6 @@ class WindowManager {
     /// own cell, past a split, between two cells, or into a split alongside its
     /// panes.
     func place(_ drag: PendingDrag, at destination: SeamDestination) {
-        AccessibilityHelper.logDebug("place \(drag) at \(destination)")
         switch drag {
         case .available(let windowId):
             guard let window = availableWindows.first(where: { $0.id == windowId }) else { return }

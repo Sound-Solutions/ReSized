@@ -197,14 +197,11 @@ struct SeamDropDelegate: DropDelegate {
     let state: SeamDragState
 
     func validateDrop(info: DropInfo) -> Bool {
-        let ok = windowManager.pendingDrag != nil
-        AccessibilityHelper.logDebug("DROP validate -> \(ok)")
-        return ok
+        windowManager.pendingDrag != nil
     }
 
     func dropEntered(info: DropInfo) {
         state.highlighted = nearestSeam(to: info.location)
-        AccessibilityHelper.logDebug("DROP entered at \(info.location); seams=\(seams().count)")
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -216,7 +213,6 @@ struct SeamDropDelegate: DropDelegate {
     }
 
     func dropExited(info: DropInfo) {
-        AccessibilityHelper.logDebug("DROP exited")
         state.highlighted = nil
     }
 
@@ -225,16 +221,9 @@ struct SeamDropDelegate: DropDelegate {
             state.highlighted = nil
             windowManager.pendingDrag = nil
         }
-        guard let drag = windowManager.pendingDrag else {
-            AccessibilityHelper.logDebug("DROP perform: no pendingDrag")
-            return false
-        }
-        guard let seam = nearestSeam(to: info.location) else {
-            AccessibilityHelper.logDebug("DROP perform: no seam near \(info.location)")
-            return false
-        }
+        guard let drag = windowManager.pendingDrag,
+              let seam = nearestSeam(to: info.location) else { return false }
 
-        AccessibilityHelper.logDebug("DROP perform: \(drag) -> \(seam.destination)")
         windowManager.place(drag, at: seam.destination)
         return true
     }
