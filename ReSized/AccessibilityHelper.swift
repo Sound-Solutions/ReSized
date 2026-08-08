@@ -357,15 +357,35 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
         cachedMaxSize = resolved
         return resolved
     }
+
+    /// Live minimized state, read from the app every time — the cached
+    /// `isMinimized` only refreshes on discovery passes, and the layout needs
+    /// the truth at apply time to give a minimized window's space away.
+    var isCurrentlyMinimized: Bool {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axElement, kAXMinimizedAttribute as CFString, &value) == .success,
+              let minimized = value as? Bool else { return false }
+        return minimized
+    }
 }
 
 /// Observes window changes using AX notifications (much faster than polling)
 class WindowObserver {
+    /// Everything registered per window. Minimize and restore are watched so
+    /// a layout can give a minimized window's space away and hand it back.
+    static let notificationNames: [CFString] = [
+        kAXMovedNotification as CFString,
+        kAXResizedNotification as CFString,
+        kAXUIElementDestroyedNotification as CFString,
+        kAXWindowMiniaturizedNotification as CFString,
+        kAXWindowDeminiaturizedNotification as CFString,
+    ]
+
     private var observers: [pid_t: AXObserver] = [:]
     private var observedElements: [(element: AXUIElement, pid: pid_t)] = []
-    private let callback: (AXUIElement) -> Void
+    private let callback: (AXUIElement, String) -> Void
 
-    init(callback: @escaping (AXUIElement) -> Void) {
+    init(callback: @escaping (AXUIElement, String) -> Void) {
         self.callback = callback
     }
 
@@ -388,9 +408,9 @@ class WindowObserver {
         // Drop the ones that have left the layout.
         for entry in observedElements where !isWanted(entry.element) {
             guard let observer = observers[entry.pid] else { continue }
-            AXObserverRemoveNotification(observer, entry.element, kAXMovedNotification as CFString)
-            AXObserverRemoveNotification(observer, entry.element, kAXResizedNotification as CFString)
-            AXObserverRemoveNotification(observer, entry.element, kAXUIElementDestroyedNotification as CFString)
+            for name in Self.notificationNames {
+                AXObserverRemoveNotification(observer, entry.element, name)
+            }
         }
         observedElements.removeAll { !isWanted($0.element) }
 
@@ -400,13 +420,13 @@ class WindowObserver {
         where !observedElements.contains(where: { CFEqual($0.element, window.axElement) }) {
             guard let observer = observer(for: window.ownerPID) else { continue }
 
-            let addMoved = AXObserverAddNotification(observer, window.axElement, kAXMovedNotification as CFString, refcon)
-            let addResized = AXObserverAddNotification(observer, window.axElement, kAXResizedNotification as CFString, refcon)
-            // Destroyed fires when the window closes, so the layout can reflow
-            // at once instead of waiting for the maintenance sweep to notice.
-            let addDestroyed = AXObserverAddNotification(observer, window.axElement, kAXUIElementDestroyedNotification as CFString, refcon)
-
-            if addMoved == .success || addResized == .success || addDestroyed == .success {
+            var anyAdded = false
+            for name in Self.notificationNames {
+                if AXObserverAddNotification(observer, window.axElement, name, refcon) == .success {
+                    anyAdded = true
+                }
+            }
+            if anyAdded {
                 observedElements.append((window.axElement, window.ownerPID))
             }
         }
@@ -453,10 +473,10 @@ class WindowObserver {
     private func handleNotification(element: AXUIElement, notification: String) {
         // Call immediately on main thread
         if Thread.isMainThread {
-            self.callback(element)
+            self.callback(element, notification)
         } else {
             DispatchQueue.main.async {
-                self.callback(element)
+                self.callback(element, notification)
             }
         }
     }
@@ -465,9 +485,9 @@ class WindowObserver {
         for (pid, observer) in observers {
             // Remove notifications for elements belonging to this PID
             for (element, elementPid) in observedElements where elementPid == pid {
-                AXObserverRemoveNotification(observer, element, kAXMovedNotification as CFString)
-                AXObserverRemoveNotification(observer, element, kAXResizedNotification as CFString)
-                AXObserverRemoveNotification(observer, element, kAXUIElementDestroyedNotification as CFString)
+                for name in Self.notificationNames {
+                    AXObserverRemoveNotification(observer, element, name)
+                }
             }
 
             CFRunLoopRemoveSource(

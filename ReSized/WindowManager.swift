@@ -3053,8 +3053,16 @@ class WindowManager {
         }
 
         if layout.windowObserver == nil {
-            layout.windowObserver = WindowObserver { [weak self, weak layout] element in
+            layout.windowObserver = WindowObserver { [weak self, weak layout] element, notification in
                 guard let self = self, let layout = layout, layout.isActive else { return }
+                if notification == kAXWindowMiniaturizedNotification as String
+                    || notification == kAXWindowDeminiaturizedNotification as String {
+                    // Minimize hands the window's space to its neighbours;
+                    // restore takes it back. The apply pass itself skips
+                    // minimized windows, so reflowing is all there is to do.
+                    self.applyLayoutAndUpdateExpected(for: layout)
+                    return
+                }
                 self.handleWindowEvent(element: element, for: layout)
             }
         }
@@ -3353,6 +3361,71 @@ class WindowManager {
     /// ended rather than where it was asked to end. The old version advanced by
     /// the requested size no matter what the app did with it, so any shortfall
     /// became a permanent gap at the seam.
+    /// The layout minus its minimized windows, proportions re-shared so the
+    /// space they gave up is actually used. The real model is untouched —
+    /// cells keep their place and proportion, so restoring a window puts it
+    /// straight back where it was.
+    private func visibleColumns(of layout: MonitorLayout) -> [Column] {
+        var visible: [Column] = []
+        for column in layout.columns {
+            var cells: [ColumnWindow] = []
+            for cell in column.windows {
+                if let window = cell.window {
+                    if !window.isCurrentlyMinimized { cells.append(cell) }
+                } else if var container = cell.nestedContainer {
+                    container.children = container.children.filter { !$0.window.isCurrentlyMinimized }
+                    guard !container.children.isEmpty else { continue }
+                    container.normalizeProportions()
+                    var copy = cell
+                    copy.nestedContainer = container
+                    cells.append(copy)
+                }
+            }
+            guard !cells.isEmpty else { continue }
+            let sum = cells.reduce(0) { $0 + $1.heightProportion }
+            if sum > 0 {
+                for i in cells.indices { cells[i].heightProportion /= sum }
+            }
+            visible.append(Column(id: column.id, widthProportion: column.widthProportion, windows: cells))
+        }
+        let widthSum = visible.reduce(0) { $0 + $1.widthProportion }
+        if widthSum > 0 {
+            for i in visible.indices { visible[i].widthProportion /= widthSum }
+        }
+        return visible
+    }
+
+    /// Row twin of visibleColumns(of:).
+    private func visibleRows(of layout: MonitorLayout) -> [Row] {
+        var visible: [Row] = []
+        for row in layout.rows {
+            var cells: [RowWindow] = []
+            for cell in row.windows {
+                if let window = cell.window {
+                    if !window.isCurrentlyMinimized { cells.append(cell) }
+                } else if var container = cell.nestedContainer {
+                    container.children = container.children.filter { !$0.window.isCurrentlyMinimized }
+                    guard !container.children.isEmpty else { continue }
+                    container.normalizeProportions()
+                    var copy = cell
+                    copy.nestedContainer = container
+                    cells.append(copy)
+                }
+            }
+            guard !cells.isEmpty else { continue }
+            let sum = cells.reduce(0) { $0 + $1.widthProportion }
+            if sum > 0 {
+                for i in cells.indices { cells[i].widthProportion /= sum }
+            }
+            visible.append(Row(id: row.id, heightProportion: row.heightProportion, windows: cells))
+        }
+        let heightSum = visible.reduce(0) { $0 + $1.heightProportion }
+        if heightSum > 0 {
+            for i in visible.indices { visible[i].heightProportion /= heightSum }
+        }
+        return visible
+    }
+
     @discardableResult
     private func applyLayoutForMonitor(_ layout: MonitorLayout) -> [UUID: CGRect] {
         let bounds = layout.containerBounds
@@ -3361,10 +3434,11 @@ class WindowManager {
 
         switch layout.layoutMode {
         case .columns:
+            let columns = visibleColumns(of: layout)
             var currentX = bounds.minX
 
-            for (colIndex, column) in layout.columns.enumerated() {
-                let isLastColumn = (colIndex == layout.columns.count - 1)
+            for (colIndex, column) in columns.enumerated() {
+                let isLastColumn = (colIndex == columns.count - 1)
                 let intendedWidth = isLastColumn
                     ? max(0, bounds.maxX - currentX)
                     : column.widthProportion * bounds.width
@@ -3421,10 +3495,11 @@ class WindowManager {
             }
 
         case .rows:
+            let rows = visibleRows(of: layout)
             var currentTop = bounds.maxY
 
-            for (rowIndex, row) in layout.rows.enumerated() {
-                let isLastRow = (rowIndex == layout.rows.count - 1)
+            for (rowIndex, row) in rows.enumerated() {
+                let isLastRow = (rowIndex == rows.count - 1)
                 let intendedHeight = isLastRow
                     ? max(0, currentTop - bounds.minY)
                     : row.heightProportion * bounds.height
@@ -3534,7 +3609,7 @@ class WindowManager {
                 }
             } else if cell.hasNestedContainer {
                 // Splits are pruned in place; the cell only dies if it empties.
-                if pruneNestedCell(cell.id, in: layout) {
+                if pruneNestedCell(cell.id, in: layout, isDead: isWindowGone) {
                     prunedNested = true
                     if nestedCellIsEmpty(cell.id, in: layout) {
                         closedCellIds.append(cell.id)
@@ -3651,10 +3726,12 @@ class WindowManager {
         }
     }
 
-    /// Prune dead windows from the split held by `cellId`, collapsing the cell
-    /// back to a plain window when exactly one survives. Returns true if the
-    /// split changed at all.
-    private func pruneNestedCell(_ cellId: UUID, in layout: MonitorLayout) -> Bool {
+    /// Prune matching windows from the split held by `cellId`, collapsing the
+    /// cell back to a plain window when exactly one survives. Returns true if
+    /// the split changed at all.
+    private func pruneNestedCell(
+        _ cellId: UUID, in layout: MonitorLayout, isDead: (ExternalWindow) -> Bool
+    ) -> Bool {
         switch layout.layoutMode {
         case .columns:
             guard let col = layout.columns.firstIndex(where: { column in
@@ -3663,7 +3740,7 @@ class WindowManager {
             let idx = layout.columns[col].windows.firstIndex(where: { $0.id == cellId }),
             var container = layout.columns[col].windows[idx].nestedContainer else { return false }
 
-            guard container.pruneDeadWindows(isDead: isWindowGone) else { return false }
+            guard container.pruneDeadWindows(isDead: isDead) else { return false }
 
             let cell = layout.columns[col].windows[idx]
             if container.children.count == 1 {
@@ -3683,7 +3760,7 @@ class WindowManager {
             let idx = layout.rows[row].windows.firstIndex(where: { $0.id == cellId }),
             var container = layout.rows[row].windows[idx].nestedContainer else { return false }
 
-            guard container.pruneDeadWindows(isDead: isWindowGone) else { return false }
+            guard container.pruneDeadWindows(isDead: isDead) else { return false }
 
             let cell = layout.rows[row].windows[idx]
             if container.children.count == 1 {
@@ -3695,6 +3772,26 @@ class WindowManager {
                 layout.rows[row].windows[idx].nestedContainer = container
             }
             return true
+        }
+    }
+
+    /// Pull a window out of a layout's model by its window id — for when a
+    /// desktop drop claims a window that a stopped layout still holds. Model
+    /// surgery only: an inactive layout has nothing on screen to re-apply.
+    func evictWindow(withId windowId: UUID, from layout: MonitorLayout) {
+        var deadCellIds: [UUID] = []
+        for cell in managedCells(in: layout) {
+            if let window = cell.window, window.id == windowId {
+                deadCellIds.append(cell.id)
+            } else if cell.hasNestedContainer {
+                if pruneNestedCell(cell.id, in: layout, isDead: { $0.id == windowId }),
+                   nestedCellIsEmpty(cell.id, in: layout) {
+                    deadCellIds.append(cell.id)
+                }
+            }
+        }
+        for cellId in deadCellIds {
+            removeClosedCell(cellId, in: layout)
         }
     }
 

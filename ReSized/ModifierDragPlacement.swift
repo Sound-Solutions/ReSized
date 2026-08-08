@@ -208,12 +208,22 @@ extension WindowManager {
         } else {
             // locateManaged only searches active layouts, so a window parked
             // in a configured-but-inactive layout reads as "unmanaged" here
-            // too. Rediscovering and inserting it would leave it sitting in
-            // both layouts' models at once — the inactive one would fight
-            // this drop for the same window the moment it starts. Refuse
-            // instead of guessing which layout should keep it.
+            // too. Inserting it while another model still holds it would have
+            // two layouts fighting over one window the moment the other one
+            // starts — so the drop takes it WITH it: evict it from every
+            // stopped layout first. The drag is the user saying where this
+            // window lives now.
             let discovered = WindowDiscovery.discoverAllWindows().first { $0.windowID == session.windowID }
-            guard let discovered, !placedWindowIds().contains(discovered.id) else { return }
+            guard let discovered else { return }
+            if placedWindowIds().contains(discovered.id) {
+                for other in monitorLayouts.values where !other.isActive {
+                    evictWindow(withId: discovered.id, from: other)
+                }
+                // Still claimed after evicting from every stopped layout means
+                // an active layout holds it and locateManaged missed it —
+                // refuse rather than double-place.
+                guard !placedWindowIds().contains(discovered.id) else { return }
+            }
             window = discovered
         }
         guard let window else { return }
