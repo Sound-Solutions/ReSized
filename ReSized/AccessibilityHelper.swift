@@ -6,6 +6,26 @@ import os.log
 /// Logger for debugging AX issues - writes to debug.txt
 private let axLogger = Logger(subsystem: "com.resized", category: "Accessibility")
 
+/// Resolves the Quartz window id behind an accessibility element.
+///
+/// There is no public API bridging the Accessibility API to Quartz Window
+/// Services, so every serious macOS window manager (yabai, Rectangle, AeroSpace)
+/// reaches for the private `_AXUIElementGetWindow`. We look it up with dlsym
+/// rather than linking it directly on purpose: a direct link to a symbol that a
+/// future macOS removes is a launch-time dyld failure — the app simply would not
+/// start. This way a missing symbol degrades to the fallback identity below.
+private let axGetWindowID: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError)? = {
+    // RTLD_DEFAULT on Darwin
+    guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow") else {
+        axLogger.error("_AXUIElementGetWindow unavailable; falling back to heuristic window identity")
+        return nil
+    }
+    return unsafeBitCast(
+        symbol,
+        to: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError).self
+    )
+}()
+
 /// Helper for macOS Accessibility API interactions
 struct AccessibilityHelper {
 
@@ -74,7 +94,10 @@ private enum DebugFileLog {
 
 /// Represents an external window that can be controlled
 class ExternalWindow: Identifiable, ObservableObject, Equatable {
-    let id = UUID()
+    /// Stable for the lifetime of the underlying OS window — see stableID.
+    let id: UUID
+    /// The Quartz window id, when it could be resolved.
+    let windowID: CGWindowID?
     let axElement: AXUIElement
     let ownerPID: pid_t
     let ownerName: String
@@ -98,12 +121,68 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
         self.ownerPID = pid
         self.ownerName = ownerName
         AXUIElementSetMessagingTimeout(axElement, Self.messagingTimeout)
+
+        let resolvedTitle = Self.getTitle(from: axElement) ?? "Untitled"
+        let resolvedWindowID = Self.windowID(for: axElement)
+        self.windowID = resolvedWindowID
+        self.id = Self.stableID(
+            windowID: resolvedWindowID,
+            pid: pid,
+            fallbackKey: "\(ownerName)\u{1}\(resolvedTitle)"
+        )
+
         self.frame = Self.getFrame(from: axElement) ?? .zero
-        self.title = Self.getTitle(from: axElement) ?? "Untitled"
+        self.title = resolvedTitle
     }
 
     static func == (lhs: ExternalWindow, rhs: ExternalWindow) -> Bool {
         lhs.id == rhs.id
+    }
+
+    /// The Quartz window id for an AX element, or nil if it can't be resolved.
+    static func windowID(for element: AXUIElement) -> CGWindowID? {
+        guard let axGetWindowID else { return nil }
+        var wid = CGWindowID(0)
+        guard axGetWindowID(element, &wid) == .success, wid != 0 else { return nil }
+        return wid
+    }
+
+    /// Derive an identity that stays the same across repeated discovery passes.
+    ///
+    /// This used to be a plain `UUID()`, and discoverAllWindows() rebuilds every
+    /// ExternalWindow on each call — so the same on-screen window got a brand new
+    /// id every scan. Every comparison against a previously stored id therefore
+    /// failed, which is why windows already placed in a layout kept reappearing in
+    /// the "available windows" picker.
+    private static func stableID(windowID: CGWindowID?, pid: pid_t, fallbackKey: String) -> UUID {
+        var bytes = [UInt8](repeating: 0, count: 16)
+
+        if let windowID {
+            // pid + Quartz window id is genuinely unique and survives retitling.
+            bytes[0] = UInt8(ascii: "W")
+            withUnsafeBytes(of: pid.littleEndian) { raw in
+                for (offset, byte) in raw.enumerated() { bytes[1 + offset] = byte }
+            }
+            withUnsafeBytes(of: windowID.littleEndian) { raw in
+                for (offset, byte) in raw.enumerated() { bytes[9 + offset] = byte }
+            }
+        } else {
+            // Fallback when the private symbol is gone: pid + owner + title. Weaker
+            // — a window that retitles changes identity — but still far better than
+            // a fresh id per scan. Hasher is per-process seeded, which is fine
+            // because identity only has to hold within a single run.
+            bytes[0] = UInt8(ascii: "F")
+            var hasher = Hasher()
+            hasher.combine(pid)
+            hasher.combine(fallbackKey)
+            withUnsafeBytes(of: Int64(hasher.finalize()).littleEndian) { raw in
+                for (offset, byte) in raw.enumerated() { bytes[1 + offset] = byte }
+            }
+        }
+
+        return bytes.withUnsafeBufferPointer { buffer in
+            NSUUID(uuidBytes: buffer.baseAddress) as UUID
+        }
     }
 
     // MARK: - Window Properties

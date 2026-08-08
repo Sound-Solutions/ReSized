@@ -28,18 +28,44 @@ struct ReSizedApp: App {
     }
 }
 
+/// Single source of truth for the global hotkeys, so the Carbon registration and
+/// every label describing it cannot drift apart.
+///
+/// These deliberately avoid Command+Shift+number: Command+Shift+3/4/5/6 are the
+/// system screenshot shortcuts, which the OS claims first, so preset slots 3, 4
+/// and 5 were effectively dead. Control+Option+number collides with nothing by
+/// default (plain Control+number is Mission Control's "switch to desktop N",
+/// which is why Option is in there).
+enum GlobalShortcut {
+    static let toggle = "⌃⌥R"
+    static let monitorPresetRange = "⌃⌥1-9"
+    static let workspacePresetRange = "⌃⌥⇧1-9"
+
+    static func monitorPreset(_ slot: Int) -> String { "⌃⌥\(slot)" }
+    static func workspacePreset(_ slot: Int) -> String { "⌃⌥⇧\(slot)" }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var startStopMenuItem: NSMenuItem?
     private var hotKeyRefs: [UInt32: EventHotKeyRef] = [:]
 
+    /// Hotkeys the OS refused to register, surfaced in Settings.
+    ///
+    /// Note this only catches hard registration failures. A hotkey already owned
+    /// by a system shortcut can still register successfully here and simply never
+    /// fire, so an empty list is not proof every binding works.
+    /// Only touched from applicationDidFinishLaunching and the Settings view,
+    /// both of which run on the main thread.
+    private(set) static var failedRegistrations: [String] = []
+
     // Static closure to open window from SwiftUI
     static var openWindowAction: (() -> Void)?
 
     // Hotkey ID scheme:
-    // ID 1 = Cmd+Shift+R (toggle start/stop)
-    // ID 10-18 = Cmd+Shift+1-9 (load monitor preset for focused window's monitor)
-    // ID 20-28 = Cmd+Option+Shift+1-9 (load workspace preset - all monitors)
+    // ID 1 = toggle start/stop
+    // ID 10-18 = load monitor preset 1-9 for the monitor under the pointer
+    // ID 20-28 = load workspace preset 1-9 (all monitors)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Check accessibility permissions on launch
@@ -96,36 +122,57 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let signature = OSType(0x52535A44) // "RSZD"
 
-        // Register Cmd+Shift+R (toggle) - ID 1
-        registerSingleHotKey(keyCode: 15, modifiers: cmdKey | shiftKey, id: 1, signature: signature)
+        AppDelegate.failedRegistrations = []
+
+        // Toggle start/stop - ID 1
+        registerSingleHotKey(
+            keyCode: 15, // R
+            modifiers: controlKey | optionKey,
+            id: 1,
+            signature: signature,
+            label: GlobalShortcut.toggle
+        )
 
         // Key codes for 1-9: 18, 19, 20, 21, 23, 22, 26, 28, 25
         let numberKeyCodes: [UInt32] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
 
-        // Register Cmd+Shift+1-9 (load monitor preset) - IDs 10-18
+        // Load monitor preset - IDs 10-18
         for (index, keyCode) in numberKeyCodes.enumerated() {
             registerSingleHotKey(
                 keyCode: keyCode,
-                modifiers: cmdKey | shiftKey,
+                modifiers: controlKey | optionKey,
                 id: UInt32(10 + index),
-                signature: signature
+                signature: signature,
+                label: GlobalShortcut.monitorPreset(index + 1)
             )
         }
 
-        // Register Cmd+Option+Shift+1-9 (load workspace preset) - IDs 20-28
+        // Load workspace preset (all monitors) - IDs 20-28
         for (index, keyCode) in numberKeyCodes.enumerated() {
             registerSingleHotKey(
                 keyCode: keyCode,
-                modifiers: cmdKey | optionKey | shiftKey,
+                modifiers: controlKey | optionKey | shiftKey,
                 id: UInt32(20 + index),
-                signature: signature
+                signature: signature,
+                label: GlobalShortcut.workspacePreset(index + 1)
             )
         }
 
-        print("Registered 19 global hotkeys")
+        if !AppDelegate.failedRegistrations.isEmpty {
+            AccessibilityHelper.logDebug(
+                "Hotkeys the system refused: \(AppDelegate.failedRegistrations.joined(separator: ", "))"
+            )
+        }
     }
 
-    private func registerSingleHotKey(keyCode: UInt32, modifiers: Int, id: UInt32, signature: OSType) {
+    @discardableResult
+    private func registerSingleHotKey(
+        keyCode: UInt32,
+        modifiers: Int,
+        id: UInt32,
+        signature: OSType,
+        label: String
+    ) -> Bool {
         var hotKeyID = EventHotKeyID()
         hotKeyID.signature = signature
         hotKeyID.id = id
@@ -140,11 +187,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             &ref
         )
 
-        if status == noErr, let ref = ref {
-            hotKeyRefs[id] = ref
-        } else {
-            print("Failed to register hotkey ID \(id): \(status)")
+        guard status == noErr, let ref else {
+            // Previously this only printed, so a shortcut that never worked gave
+            // the user no signal at all.
+            AppDelegate.failedRegistrations.append(label)
+            return false
         }
+
+        hotKeyRefs[id] = ref
+        return true
     }
 
     private static func handleHotKey(id: UInt32) {
@@ -246,19 +297,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
 
-        // Simulate Cmd+, keyboard shortcut to open Settings
-        let source = CGEventSource(stateID: .hidSystemState)
-
-        // Key down: comma with command modifier
-        if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x2B, keyDown: true) {
-            keyDown.flags = .maskCommand
-            keyDown.post(tap: .cghidEventTap)
-        }
-
-        // Key up
-        if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x2B, keyDown: false) {
-            keyUp.flags = .maskCommand
-            keyUp.post(tap: .cghidEventTap)
+        // Send the standard action rather than synthesising a Cmd+, keystroke.
+        // NSApp.activate is asynchronous, so a posted key event could land before
+        // we were actually frontmost — opening whichever app still had focus and
+        // its settings window instead of ours.
+        if #available(macOS 14, *) {
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } else {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
         }
     }
 

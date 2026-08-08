@@ -290,9 +290,18 @@ enum AppState {
     case active         // Layout is active and managing windows
 }
 
+extension NSScreen {
+    var displayID: CGDirectDisplayID? {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+}
+
 /// Represents a monitor/screen
 struct Monitor: Identifiable, Equatable {
     let id: String
+    /// The pre-existing CGDirectDisplayID-based key. Retained only so presets
+    /// saved before identities became stable can still be found.
+    let legacyID: String
     let screen: NSScreen
     let name: String
     let frame: CGRect
@@ -300,18 +309,32 @@ struct Monitor: Identifiable, Equatable {
 
     init(screen: NSScreen, index: Int) {
         self.screen = screen
-        self.id = "\(screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] ?? index)"
+        let displayID = screen.displayID
+        self.id = Monitor.stableIdentifier(for: displayID, fallbackIndex: index)
+        self.legacyID = "\(displayID.map(String.init) ?? String(index))"
         self.frame = screen.visibleFrame
-        self.isMain = screen == NSScreen.main
+        // NSScreen.main follows keyboard focus, so it moves as you click between
+        // displays. "Main" here means the primary display — the one at the
+        // coordinate origin — which is always screens.first.
+        self.isMain = screen == NSScreen.screens.first
+        // localizedName is non-optional, so the old `as String?` fallbacks below
+        // it were unreachable.
+        self.name = screen.localizedName
+    }
 
-        // Try to get a meaningful name
-        if let name = screen.localizedName as String? {
-            self.name = name
-        } else if isMain {
-            self.name = "Main Display"
-        } else {
-            self.name = "Display \(index + 1)"
+    /// A per-display identity that survives reboots and reconnects.
+    ///
+    /// This used to be the raw CGDirectDisplayID, which macOS reassigns freely —
+    /// so per-monitor presets keyed on it silently stopped matching after you
+    /// unplugged a display or restarted, which looked like the presets had been
+    /// lost. The display UUID is tied to the physical panel instead.
+    static func stableIdentifier(for displayID: CGDirectDisplayID?, fallbackIndex: Int) -> String {
+        guard let displayID,
+              let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue(),
+              let string = CFUUIDCreateString(nil, uuid) as String? else {
+            return "index-\(fallbackIndex)"
         }
+        return string
     }
 
     static func == (lhs: Monitor, rhs: Monitor) -> Bool {
@@ -2916,8 +2939,11 @@ class WindowManager: ObservableObject {
 
         // Also save to monitor presets if a slot was assigned (for hotkeys)
         if let slot = presetSlot {
+            let keys = storageKeys(for: monitorId)
             var presets = loadMonitorPresetsList()
-            presets.removeAll { $0.presetSlot == slot && $0.monitorId == monitorId }
+            // Clear any legacy-keyed entry for this same monitor too, or the stale
+            // one could win the lookup in getMonitorPreset.
+            presets.removeAll { $0.presetSlot == slot && $0.monitorId.map(keys.contains) == true }
             presets.append(saved)
 
             if let data = try? JSONEncoder().encode(presets) {
@@ -3041,10 +3067,8 @@ class WindowManager: ObservableObject {
             return
         }
 
-        // Create layout for this monitor if it doesn't exist
-        if monitorLayouts[monitor.id] == nil {
-            monitorLayouts[monitor.id] = MonitorLayout(monitor: monitor)
-        }
+        // Hotkeys can fire before the config window has ever been opened
+        ensureLayoutsForAllMonitors()
 
         if let existing = getMonitorPreset(slot: slot, monitorId: monitor.id),
            let layout = monitorLayouts[monitor.id] {
@@ -3053,15 +3077,29 @@ class WindowManager: ObservableObject {
         }
     }
 
+    /// Every key a monitor's presets might be stored under: its stable id, plus
+    /// the legacy display-id key used before identities became stable, so an
+    /// upgrade doesn't orphan presets people already saved.
+    private func storageKeys(for monitorId: String) -> Set<String> {
+        guard let monitor = availableMonitors.first(where: { $0.id == monitorId }) else {
+            return [monitorId]
+        }
+        return [monitor.id, monitor.legacyID]
+    }
+
     func getMonitorPreset(slot: Int, monitorId: String) -> SavedLayout? {
+        let keys = storageKeys(for: monitorId)
         let presets = loadMonitorPresetsList()
-        return presets.first { $0.presetSlot == slot && $0.monitorId == monitorId }
+        return presets.first { preset in
+            preset.presetSlot == slot && preset.monitorId.map(keys.contains) == true
+        }
     }
 
     /// Get names of presets in each slot for the current monitor (for UI display)
     func getMonitorPresetNames() -> [Int: String] {
         guard let monitorId = selectedMonitor?.id else { return [:] }
-        let presets = loadMonitorPresetsList().filter { $0.monitorId == monitorId }
+        let keys = storageKeys(for: monitorId)
+        let presets = loadMonitorPresetsList().filter { $0.monitorId.map(keys.contains) == true }
         var result: [Int: String] = [:]
         for preset in presets {
             if let slot = preset.presetSlot {
@@ -3115,14 +3153,44 @@ class WindowManager: ObservableObject {
     // actually calls. Removed so there's one way to write a workspace preset.
 
     func loadWorkspacePreset(_ workspace: WorkspaceLayout) {
+        // A workspace preset can be triggered by hotkey before the config window
+        // has ever been opened, which is the normal case for a launch-at-login
+        // menu bar app — so make sure the layouts it expects actually exist.
+        ensureLayoutsForAllMonitors()
+
         for savedLayout in workspace.monitorLayouts {
             guard let monitorId = savedLayout.monitorId,
-                  let layout = monitorLayouts[monitorId] else { continue }
+                  let layout = layout(forStoredMonitorId: monitorId) else { continue }
             loadLayoutIntoMonitor(saved: savedLayout, layout: layout)
         }
 
         // Start managing after loading
         startAllLayouts()
+    }
+
+    /// Make sure every connected monitor has a layout object.
+    ///
+    /// These were only ever created by the config window, so workspace hotkeys
+    /// silently did nothing until it had been opened once — every boot, for a
+    /// menu bar app that launches at login with no window.
+    func ensureLayoutsForAllMonitors() {
+        let mode = loadLastUsedLayoutMode()
+        for monitor in availableMonitors where monitorLayouts[monitor.id] == nil {
+            let layout = MonitorLayout(monitor: monitor)
+            layout.layoutMode = mode
+            layout.appState = .configuring
+            monitorLayouts[monitor.id] = layout
+        }
+    }
+
+    /// Resolve a stored monitor identifier to a live layout, tolerating the legacy
+    /// display-id keys written before identities became stable.
+    private func layout(forStoredMonitorId storedId: String) -> MonitorLayout? {
+        if let layout = monitorLayouts[storedId] { return layout }
+        guard let monitor = availableMonitors.first(where: { $0.legacyID == storedId }) else {
+            return nil
+        }
+        return monitorLayouts[monitor.id]
     }
 
     /// Load a saved layout into a monitor layout

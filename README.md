@@ -40,19 +40,25 @@ ReSized is a lightweight macOS window manager that lets you define custom layout
 ### Saving & Loading Presets
 
 **Save a preset:**
-- Arrange your layout, then click a preset slot (1-9) to save it
+1. Arrange your layout, then click the save icon in the toolbar and choose **Save Layout...**
+2. Give it a name
+3. Choose the scope — **Current Monitor Only** or **Full Workspace (All Monitors)**
+4. Optionally assign it to a hotkey slot (1-9) with the **Assign to hotkey** picker
 
 **Load a preset:**
-- Click a saved preset slot to restore that layout
-- Or use keyboard shortcuts (see below)
+- Pick it from the same menu, or use its keyboard shortcut if you assigned a slot
 
 ### Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
-| `⌘⇧R` | Toggle window management on/off |
-| `⌘⇧1-9` | Load preset 1-9 for the current monitor |
-| `⌘⌥⇧1-9` | Load workspace preset 1-9 (all monitors) |
+| `⌃⌥R` | Toggle window management on/off |
+| `⌃⌥1-9` | Load preset 1-9 for the monitor under the pointer |
+| `⌃⌥⇧1-9` | Load workspace preset 1-9 (all monitors) |
+
+These deliberately avoid `⌘⇧`+number, which collides with the macOS screenshot
+shortcuts (`⌘⇧3`/`⌘⇧4`/`⌘⇧5`). If another app has already claimed one of these,
+Settings will list it as unregistered.
 
 ### Menu Bar
 
@@ -63,8 +69,8 @@ ReSized is a lightweight macOS window manager that lets you define custom layout
 
 ## Tips
 
-- **Focus a window** before pressing `⌘⇧1-9` to load a preset for that window's monitor
-- Use **workspace presets** (`⌘⌥⇧1-9`) to restore your entire multi-monitor setup at once
+- **Move your pointer** onto a monitor before pressing `⌃⌥1-9` — the preset loads for the display the cursor is on
+- Use **workspace presets** (`⌃⌥⇧1-9`) to restore your entire multi-monitor setup at once
 - Layouts automatically adjust when you connect/disconnect monitors
 
 ## License

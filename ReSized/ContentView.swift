@@ -2484,7 +2484,9 @@ struct LayoutMenu: View {
                         Text("None").tag(0)
                         ForEach(1...9, id: \.self) { slot in
                             let presetNames = saveAsWorkspace ? workspacePresetNames : monitorPresetNames
-                            let shortcut = saveAsWorkspace ? "⌘⌥⇧\(slot)" : "⌘⇧\(slot)"
+                            let shortcut = saveAsWorkspace
+                                ? GlobalShortcut.workspacePreset(slot)
+                                : GlobalShortcut.monitorPreset(slot)
                             if let existingName = presetNames[slot] {
                                 Text("\(shortcut): \(existingName)").tag(slot)
                             } else {
@@ -2596,17 +2598,30 @@ struct SettingsView: View {
             }
 
             Section("Keyboard Shortcuts") {
-                ShortcutRow(action: "Toggle Start/Stop", shortcut: "⌘⇧R")
+                ShortcutRow(action: "Toggle Start/Stop", shortcut: GlobalShortcut.toggle)
                 Divider()
-                ShortcutRow(action: "Load Preset 1-9", shortcut: "⌘⇧1-9")
-                Text("Load preset for current monitor")
+                ShortcutRow(action: "Load Preset 1-9", shortcut: GlobalShortcut.monitorPresetRange)
+                Text("Load preset for the monitor under the pointer")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Divider()
-                ShortcutRow(action: "Load All Monitors", shortcut: "⌘⌥⇧1-9")
+                ShortcutRow(action: "Load All Monitors", shortcut: GlobalShortcut.workspacePresetRange)
                 Text("Load workspace preset (all monitors)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if !AppDelegate.failedRegistrations.isEmpty {
+                    Divider()
+                    Label(
+                        "Not registered: \(AppDelegate.failedRegistrations.joined(separator: ", "))",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    Text("Another app already owns these shortcuts.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding()
