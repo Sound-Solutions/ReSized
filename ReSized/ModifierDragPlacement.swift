@@ -45,6 +45,7 @@ extension WindowManager {
 
     private func modifierDragBegan(at point: CGPoint) {
         modifierDragSession = nil
+        clearDropIndicator()
         // A drag starting on one of our seam handles is the seam's gesture.
         guard !cursorIsOnSeamHandle(at: point) else { return }
         guard let hit = topmostOrdinaryWindow(at: point),
@@ -59,7 +60,13 @@ extension WindowManager {
 
         guard armed else {
             // Releasing the modifier mid-drag turns this back into an
-            // ordinary drag: indicator down, snap-back re-enabled.
+            // ordinary drag: indicator down, snap-back re-enabled. Suppression
+            // already let the window drift while it was confirmed, and the AX
+            // event that would normally trigger a snap-back may not arrive
+            // again before mouse-up — force one now instead of waiting.
+            if session.confirmedWindowDrag, let managed = locateManaged(windowID: session.windowID) {
+                applyLayoutAndUpdateExpected(for: managed.layout)
+            }
             if session.confirmedWindowDrag || session.target != nil {
                 session.confirmedWindowDrag = false
                 session.target = nil
@@ -73,12 +80,16 @@ extension WindowManager {
         if !session.confirmedWindowDrag {
             let cursorDX = point.x - session.startCursor.x
             let cursorDY = point.y - session.startCursor.y
-            // Judge only after real travel, then the window must have come along.
-            guard hypot(cursorDX, cursorDY) > 15 else { return }
+            // Cursor travel must clear the origin-agreement tolerance below —
+            // otherwise a stationary window sitting inside that tolerance
+            // would confirm on travel alone, and an ⌥⇧ text column-selection
+            // near a seam would read as dragging the editor window itself.
+            guard hypot(cursorDX, cursorDY) > 40 else { return }
             guard let bounds = windowServerBounds(of: session.windowID) else { return }
             let originDX = bounds.origin.x - session.startBounds.origin.x
             let originDY = bounds.origin.y - session.startBounds.origin.y
-            guard abs(originDX - cursorDX) < 24, abs(originDY - cursorDY) < 24 else { return }
+            guard hypot(originDX, originDY) > 10,
+                  abs(originDX - cursorDX) < 24, abs(originDY - cursorDY) < 24 else { return }
             session.confirmedWindowDrag = true
         }
 
@@ -108,7 +119,15 @@ extension WindowManager {
         guard let session = modifierDragSession else { return }
         modifierDragSession = nil
         clearDropIndicator()
-        guard armed, session.confirmedWindowDrag else { return }
+        guard armed, session.confirmedWindowDrag else {
+            // The modifier could have stayed down through every onUpdate and
+            // only let go right at release — modifierDragMoved's own
+            // snap-back never got a chance to run. Cover it here too.
+            if session.confirmedWindowDrag, let managed = locateManaged(windowID: session.windowID) {
+                applyLayoutAndUpdateExpected(for: managed.layout)
+            }
+            return
+        }
 
         let source = locateManaged(windowID: session.windowID)
 
@@ -119,7 +138,10 @@ extension WindowManager {
             // Released clear of every boundary: the window leaves the grid and
             // floats where it was dropped; the survivors take the space.
             AccessibilityHelper.logDebug("modifier-drag: float out wid=\(session.windowID)")
-            withLayout(source.layout) { _ = takeWindow(at: source.slot) }
+            guard withLayout(source.layout, { () -> Void in
+                _ = takeWindow(at: source.slot)
+                pruneIfEmptied(at: source.slot, in: source.layout)
+            }) != nil else { return }
             refreshAvailableWindows()
             applyLayoutAndUpdateExpected(for: source.layout)
         }
@@ -134,10 +156,11 @@ extension WindowManager {
         AccessibilityHelper.logDebug("modifier-drag: drop wid=\(session.windowID) dest=\(destination)")
 
         // Same layout, seam destination: place(.placed) handles vacate +
-        // renumber + no-op detection in one piece — use it.
+        // renumber + no-op detection in one piece — use it. place() ends in
+        // insert(), which always applies the layout itself, so there is
+        // nothing left to do here once it returns.
         if let source, source.layout === targetLayout, case .seam(let seamDestination) = destination {
             withLayout(targetLayout) { place(.placed(source.slot), at: seamDestination) }
-            applyLayoutAndUpdateExpected(for: targetLayout)
             return
         }
 
@@ -147,10 +170,16 @@ extension WindowManager {
         if let source {
             let columnsBefore = source.layout.columns.count
             let rowsBefore = source.layout.rows.count
-            window = withLayout(source.layout) { takeWindow(at: source.slot) }
+            guard let taken = withLayout(source.layout, { () -> ExternalWindow? in
+                let w = takeWindow(at: source.slot)
+                pruneIfEmptied(at: source.slot, in: source.layout)
+                return w
+            }) else { return }
+            window = taken
             if source.layout === targetLayout {
-                // Vacating can dissolve the source's own column/row, shifting
-                // the boundary the drop was aimed at.
+                // Vacating can dissolve the source's own column/row (directly,
+                // or via pruneIfEmptied above once it's left with nothing in
+                // it), shifting the boundary the drop was aimed at.
                 if case .newColumn(let index) = destination,
                    source.layout.columns.count < columnsBefore,
                    let sourceColumn = source.slot.columnIndex, sourceColumn < index {
@@ -162,6 +191,8 @@ extension WindowManager {
                     adjustedDestination = .newRow(index: index - 1)
                 }
             } else {
+                // takeWindow alone applies nothing — this is a different
+                // layout than the one about to be applied below.
                 applyLayoutAndUpdateExpected(for: source.layout)
             }
         } else {
@@ -169,28 +200,58 @@ extension WindowManager {
         }
         guard let window else { return }
 
-        withLayout(targetLayout) {
+        // place()/insertColumn/insertRow all apply the layout themselves.
+        guard withLayout(targetLayout, { () -> Void in
             switch adjustedDestination {
             case .seam(let seamDestination): place(window, at: seamDestination)
             case .newColumn(let index): insertColumn(with: window, at: index)
             case .newRow(let index): insertRow(with: window, at: index)
             }
-        }
+        }) != nil else { return }
         refreshAvailableWindows()
-        applyLayoutAndUpdateExpected(for: targetLayout)
+    }
+
+    /// After takeWindow empties a slot, drop the column/row it lived in if
+    /// nothing is left there and re-share what remains equally.
+    ///
+    /// removeCell deliberately leaves an emptied column/row in place — on the
+    /// config grid an empty column is a legitimate live drop target mid-drag
+    /// — but a desktop drop has already landed, and nothing else ever comes
+    /// back to prune it: left alone, the vacated space stays permanently
+    /// blank. Mirrors removeClosedCell's emptied-column/row branch. Operates
+    /// on `layout` directly rather than through the currentLayout proxy, like
+    /// removeClosedCell does, so it works regardless of selectedMonitor.
+    private func pruneIfEmptied(at slot: WindowSlot, in layout: MonitorLayout) {
+        if let columnIndex = slot.columnIndex, layout.columns.indices.contains(columnIndex),
+           layout.columns[columnIndex].windows.isEmpty {
+            layout.columns.remove(at: columnIndex)
+            if !layout.columns.isEmpty {
+                let share = 1.0 / CGFloat(layout.columns.count)
+                for i in layout.columns.indices { layout.columns[i].widthProportion = share }
+            }
+        } else if let rowIndex = slot.rowIndex, layout.rows.indices.contains(rowIndex),
+                  layout.rows[rowIndex].windows.isEmpty {
+            layout.rows.remove(at: rowIndex)
+            if !layout.rows.isEmpty {
+                let share = 1.0 / CGFloat(layout.rows.count)
+                for i in layout.rows.indices { layout.rows[i].heightProportion = share }
+            }
+        }
     }
 
     // MARK: Helpers
 
-    /// Run a mutation against a specific monitor's layout. Every existing
-    /// mutation routes through the currentLayout proxies, so the smallest
-    /// correct lever is to point them at the right monitor for the duration.
+    /// Run a mutation against a specific monitor's layout, or do nothing if
+    /// that monitor isn't available right now (e.g. unplugged mid-drag).
+    /// Every existing mutation routes through the currentLayout proxies, so
+    /// the smallest correct lever is to point them at the right monitor for
+    /// the duration — failing closed here beats silently mutating whatever
+    /// layout selectedMonitor already happened to be pointing at.
     @discardableResult
-    func withLayout<T>(_ layout: MonitorLayout, _ body: () -> T) -> T {
+    func withLayout<T>(_ layout: MonitorLayout, _ body: () -> T) -> T? {
+        guard let monitor = availableMonitors.first(where: { $0.id == layout.monitorId }) else { return nil }
         let saved = selectedMonitor
-        if let monitor = availableMonitors.first(where: { $0.id == layout.monitorId }) {
-            selectedMonitor = monitor
-        }
+        selectedMonitor = monitor
         defer { selectedMonitor = saved }
         return body()
     }
@@ -257,7 +318,11 @@ extension WindowManager {
                   let pid = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
                   let boundsDict = entry[kCGWindowBounds as String] as? [String: Any],
                   let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary),
-                  bounds.contains(point)
+                  bounds.contains(point),
+                  // Matches discoverAllWindows' filter — an accessory-app
+                  // window (menu bar extras, panels) would light up a drop
+                  // indicator that then has nowhere real to land it.
+                  NSRunningApplication(processIdentifier: pid)?.activationPolicy == .regular
             else { continue }
             return (number, pid, bounds)
         }
@@ -273,12 +338,21 @@ extension WindowManager {
         return CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
     }
 
-    /// Whether a top-left-coords point sits on one of the desktop seam handles.
+    /// Whether a top-left-coords point sits on one of the desktop seam
+    /// handles — and that handle is actually exposed (not covered by a real
+    /// window on top of it). An occluded seam draws nothing and eats no
+    /// clicks, so the gesture underneath it must stay live, or the point
+    /// becomes a dead band where neither the seam handle nor the drag works.
     private func cursorIsOnSeamHandle(at point: CGPoint) -> Bool {
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
         let cocoaPoint = CGPoint(x: point.x, y: primaryHeight - point.y)
         for layout in monitorLayouts.values where layout.isActive {
-            if desktopSeams(for: layout).contains(where: { $0.rect.contains(cocoaPoint) }) {
+            // The overlay's own cached seams — same ones it hit-tests against
+            // — rather than recomputing them on every system-wide click.
+            guard let seamView = layout.seamOverlay?.seamView,
+                  seamView.seams.contains(where: { $0.rect.contains(cocoaPoint) })
+            else { continue }
+            if seamView.isPointExposed?(cocoaPoint) ?? true {
                 return true
             }
         }

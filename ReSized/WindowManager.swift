@@ -3113,9 +3113,13 @@ class WindowManager {
         // same amount, so the resize handlers see no change in width or height,
         // adjust nothing, and leave the window wherever it was dropped.
         if isMove(delta) {
-            // A modifier-drag in flight owns this window; snapping it back
-            // mid-gesture would fight the user's hand. Release decides.
-            if modifierDragSession?.confirmedWindowDrag == true { return }
+            // A modifier-drag in flight owns exactly one window; scope the
+            // suppression to it so every other window in the layout still
+            // snaps back if it drifts. Release decides this one's fate.
+            if modifierDragSession?.confirmedWindowDrag == true,
+               found.window.windowID == modifierDragSession?.windowID {
+                return
+            }
             reflowWorkItem?.cancel()
             applyLayoutAndUpdateExpected(for: layout)
             return
@@ -3150,23 +3154,25 @@ class WindowManager {
     ///
     /// `frameKey` is what expectedFrames stores this window's last known frame
     /// under: a cell's own id for a plain window, the pane's id for a window
-    /// inside a split.
+    /// inside a split. `window` is the matched ExternalWindow itself, so
+    /// callers can identify which real window this event belongs to without
+    /// a second traversal.
     private func locate(
         element: AXUIElement,
         in layout: MonitorLayout
-    ) -> (slot: WindowSlot, frameKey: UUID)? {
+    ) -> (slot: WindowSlot, frameKey: UUID, window: ExternalWindow)? {
         func search(
             _ cells: [(id: UUID, window: ExternalWindow?, container: LayoutContainer?)],
             _ slotAt: (Int, Int?) -> WindowSlot
-        ) -> (slot: WindowSlot, frameKey: UUID)? {
+        ) -> (slot: WindowSlot, frameKey: UUID, window: ExternalWindow)? {
             for (windowIndex, cell) in cells.enumerated() {
                 if let window = cell.window, CFEqual(window.axElement, element) {
-                    return (slotAt(windowIndex, nil), cell.id)
+                    return (slotAt(windowIndex, nil), cell.id, window)
                 }
                 guard let container = cell.container else { continue }
                 for (nestedIndex, pane) in container.children.enumerated()
                 where CFEqual(pane.window.axElement, element) {
-                    return (slotAt(windowIndex, nestedIndex), pane.id)
+                    return (slotAt(windowIndex, nestedIndex), pane.id, pane.window)
                 }
             }
             return nil
