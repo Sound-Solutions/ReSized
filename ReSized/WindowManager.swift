@@ -595,6 +595,11 @@ class WindowManager: ObservableObject {
             let isEmpty = (currentLayout?.columns.isEmpty ?? true) && (currentLayout?.rows.isEmpty ?? true)
             if isEmpty {
                 _ = scanExistingLayout()
+            } else {
+                // scanExistingLayout refreshes the picker itself; a non-empty
+                // layout skipped it entirely, so switching tabs left the sidebar
+                // showing whatever it had computed for the previous monitor.
+                refreshAvailableWindows()
             }
         }
 
@@ -936,8 +941,15 @@ class WindowManager: ObservableObject {
         // Window frames are in AX coords (Y=0 at top)
         let monitorFrameAX = convertFrameToAXCoordinates(monitor.frame)
 
+        // A window you have already placed on another monitor is spoken for, even
+        // though it is still physically sitting on this one until the layout is
+        // started. Without this, switching to a monitor's tab auto-scanned those
+        // windows straight back into a second layout.
+        let claimedElsewhere = placedWindowIds(excludingMonitor: monitor.id)
+
         // Filter to windows that overlap with this monitor
         let windowsOnMonitor = allWindows.filter { window in
+            guard !claimedElsewhere.contains(window.id) else { return false }
             let frame = window.frame  // Already in AX coordinates
             // Check if window overlaps with monitor (at least 50% on this monitor)
             let intersection = frame.intersection(monitorFrameAX)
@@ -1182,23 +1194,24 @@ class WindowManager: ObservableObject {
         }
 
         let discovered = WindowDiscovery.discoverAllWindows()
-        let placed = placedWindowIds
+        let placed = placedWindowIds()
         availableWindows = discovered.filter { !placed.contains($0.id) }
     }
 
     /// Every window currently placed in any monitor's layout, nested splits
-    /// included.
+    /// included. Placement in the config counts — nothing here waits on the
+    /// layout being started.
     ///
     /// Deliberately spans all monitors: a window parked in the layout for another
-    /// display is still spoken for, and offering it again in the picker invites
-    /// assigning the same window to two places at once.
+    /// display is still spoken for, and offering it again invites assigning the
+    /// same window to two places at once.
     ///
     /// Only the layout's active mode is counted. Each MonitorLayout keeps both a
     /// columns and a rows array and just one of them is live, so counting both
     /// would reserve windows left behind in whichever mode isn't in use.
-    private var placedWindowIds: Set<UUID> {
+    private func placedWindowIds(excludingMonitor excludedId: String? = nil) -> Set<UUID> {
         var ids = Set<UUID>()
-        for layout in monitorLayouts.values {
+        for (monitorId, layout) in monitorLayouts where monitorId != excludedId {
             switch layout.layoutMode {
             case .columns:
                 for column in layout.columns {
