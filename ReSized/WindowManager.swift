@@ -3445,7 +3445,7 @@ class WindowManager {
     }
 
     /// Convert NSScreen frame to AX coordinates for comparison
-    private func convertFrameToAXCoordinates(_ frame: CGRect) -> CGRect {
+    func convertFrameToAXCoordinates(_ frame: CGRect) -> CGRect {
         guard let mainScreen = NSScreen.screens.first else { return frame }
         let screenHeight = mainScreen.frame.height
         let axY = screenHeight - frame.origin.y - frame.height
@@ -3453,7 +3453,7 @@ class WindowManager {
     }
 
     /// The Y flip is its own inverse; this exists so call sites read as intent.
-    private func convertFrameFromAXCoordinates(_ frame: CGRect) -> CGRect {
+    func convertFrameFromAXCoordinates(_ frame: CGRect) -> CGRect {
         convertFrameToAXCoordinates(frame)
     }
 
