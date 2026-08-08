@@ -690,13 +690,10 @@ class WindowManager: ObservableObject {
 
         guard let monitor = targetMonitor else { return }
 
-        // Select and scan just this monitor
-        selectMonitor(monitor)
+        // Populate every monitor now, not lazily when its tab is first clicked
+        scanAllMonitorLayouts()
 
-        // Only scan if we have accessibility permissions
-        if AccessibilityHelper.checkAccessibilityPermissions() {
-            _ = scanExistingLayout()
-        }
+        selectMonitor(monitor)
 
         // Ensure we're in configuring state (even if no windows found)
         if layoutMode == .columns && columns.isEmpty {
@@ -708,21 +705,35 @@ class WindowManager: ObservableObject {
         appState = .configuring
     }
 
+    /// Scan every connected monitor so all layouts are populated up front.
+    ///
+    /// Order matters and the sequence is the point: each scan skips windows
+    /// already claimed by another monitor's layout, so running them all now is
+    /// what makes "this window is taken" correct on every tab. Doing it lazily
+    /// meant the answer was only right for tabs you had already clicked, and
+    /// looked like the app was waiting for you to start the layout.
+    private func scanAllMonitorLayouts() {
+        guard AccessibilityHelper.checkAccessibilityPermissions() else { return }
+
+        let previousSelection = selectedMonitor
+        for monitor in availableMonitors {
+            // scanExistingLayout works on the selected monitor
+            selectedMonitor = monitor
+            _ = scanExistingLayout()
+        }
+        selectedMonitor = previousSelection
+    }
+
     /// Scan all monitors on launch and select the main one
     func scanAllMonitors() {
         guard AccessibilityHelper.checkAccessibilityPermissions() else { return }
 
-        // Scan each monitor
-        for monitor in availableMonitors {
-            // Create layout for this monitor if needed
-            if monitorLayouts[monitor.id] == nil {
-                monitorLayouts[monitor.id] = MonitorLayout(monitor: monitor)
-            }
-
-            // Temporarily select to scan
-            selectedMonitor = monitor
-            _ = scanExistingLayout()
+        // Create layouts for any monitor that doesn't have one yet
+        for monitor in availableMonitors where monitorLayouts[monitor.id] == nil {
+            monitorLayouts[monitor.id] = MonitorLayout(monitor: monitor)
         }
+
+        scanAllMonitorLayouts()
 
         // Select main monitor and go to configuring
         if let mainMonitor = availableMonitors.first(where: { $0.isMain }) ?? availableMonitors.first {
