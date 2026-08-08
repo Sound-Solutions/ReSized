@@ -335,19 +335,24 @@ struct Monitor: Identifiable, Equatable {
 }
 
 /// Per-monitor layout state
-class MonitorLayout: ObservableObject {
+@Observable
+class MonitorLayout {
     let monitorId: String
-    let screen: NSScreen
+    @ObservationIgnored let screen: NSScreen
 
-    @Published var layoutMode: LayoutMode = .columns
-    @Published var columns: [Column] = []  // Used when layoutMode == .columns
-    @Published var rows: [Row] = []        // Used when layoutMode == .rows
-    @Published var appState: AppState = .modeSelect
-    @Published var containerBounds: CGRect = .zero
-    @Published var isActive: Bool = false
+    var layoutMode: LayoutMode = .columns
+    var columns: [Column] = []  // Used when layoutMode == .columns
+    var rows: [Row] = []        // Used when layoutMode == .rows
+    var appState: AppState = .modeSelect
+    var containerBounds: CGRect = .zero
+    var isActive: Bool = false
 
-    var windowObserver: WindowObserver?
-    var expectedFrames: [UUID: CGRect] = [:]
+    /// Bookkeeping for window events, deliberately outside observation. These
+    /// churn on every notification while a window is being dragged, and nothing
+    /// on screen is drawn from them — observing them would redraw the layout
+    /// dozens of times a second for no visible reason.
+    @ObservationIgnored var windowObserver: WindowObserver?
+    @ObservationIgnored var expectedFrames: [UUID: CGRect] = [:]
 
     /// Move/resize notifications caused by our own layout writes arrive on the run
     /// loop *after* the write returns, so a synchronous "am I applying" flag never
@@ -355,7 +360,7 @@ class MonitorLayout: ObservableObject {
     /// deadline instead. Apps with size increments (Terminal) never land on exactly
     /// the frame we asked for, which is what turned that into a feedback loop:
     /// every apply looked like a user resize and triggered another apply.
-    var suppressEventsUntil: Date = .distantPast
+    @ObservationIgnored var suppressEventsUntil: Date = .distantPast
 
     /// Small margin to account for apps that can't fill exactly (size increments, min sizes)
     static let edgeMargin: CGFloat = 8
@@ -374,34 +379,40 @@ class MonitorLayout: ObservableObject {
 }
 
 /// The main window manager with column-based layout
-class WindowManager: ObservableObject {
-    static let shared = WindowManager()
+@Observable
+class WindowManager {
+    @ObservationIgnored static let shared = WindowManager()
 
     /// Available monitors
-    @Published var availableMonitors: [Monitor] = []
+    var availableMonitors: [Monitor] = []
 
     /// Currently selected/viewed monitor
-    @Published var selectedMonitor: Monitor?
+    var selectedMonitor: Monitor?
 
     /// Per-monitor layouts
-    @Published var monitorLayouts: [String: MonitorLayout] = [:]
+    var monitorLayouts: [String: MonitorLayout] = [:]
 
     /// All discovered windows available to add
-    @Published var availableWindows: [ExternalWindow] = []
+    var availableWindows: [ExternalWindow] = []
 
-    private var cancellables = Set<AnyCancellable>()
+    @ObservationIgnored private var cancellables = Set<AnyCancellable>()
 
-    /// Cache for app hue colors to avoid expensive recalculation on every render
-    private var hueCache: [String: Double] = [:]
-    private var hueCacheRevision: Int = -1
+    /// Cache for app hue colors to avoid expensive recalculation on every render.
+    ///
+    /// Written from hueForApp, which every tile calls from its body — so this
+    /// has to stay outside observation. Observed state mutated during a render
+    /// pass is what SwiftUI warns about, and it would invalidate the very views
+    /// asking for the colour.
+    @ObservationIgnored private var hueCache: [String: Double] = [:]
+    @ObservationIgnored private var hueCacheRevision: Int = -1
 
     /// Bumped whenever the layout's structure changes, so derived caches can tell
     /// they're stale without re-deriving a signature on every single read.
-    private var layoutRevision: Int = 0
+    @ObservationIgnored private var layoutRevision: Int = 0
 
     /// One low-frequency timer shared by every active layout — see
     /// startMaintenanceTimerIfNeeded() for why this is not a display link.
-    private var maintenanceTimer: DispatchSourceTimer?
+    @ObservationIgnored private var maintenanceTimer: DispatchSourceTimer?
     private static let maintenanceInterval: TimeInterval = 1.0
 
     /// How long to ignore window events after we move windows ourselves.
@@ -413,7 +424,7 @@ class WindowManager: ObservableObject {
     private static let eventSuppressionInterval: TimeInterval = 0.05
 
     /// Coalesces reflows while the user is dragging a real window's edge.
-    private var reflowWorkItem: DispatchWorkItem?
+    @ObservationIgnored private var reflowWorkItem: DispatchWorkItem?
     private static let reflowDebounceInterval: TimeInterval = 0.12
 
     // MARK: - Computed Properties (proxy to current monitor's layout)
@@ -437,7 +448,6 @@ class WindowManager: ObservableObject {
         set {
             guard let layout = currentLayout else { return }
             layout.appState = newValue
-            objectWillChange.send()
         }
     }
 
@@ -447,7 +457,6 @@ class WindowManager: ObservableObject {
             guard let layout = currentLayout else { return }
             layout.layoutMode = newValue
             layoutRevision &+= 1
-            objectWillChange.send()
         }
     }
 
@@ -457,7 +466,6 @@ class WindowManager: ObservableObject {
             guard let layout = currentLayout else { return }
             layout.columns = newValue
             layoutRevision &+= 1
-            objectWillChange.send()
         }
     }
 
@@ -467,7 +475,6 @@ class WindowManager: ObservableObject {
             guard let layout = currentLayout else { return }
             layout.rows = newValue
             layoutRevision &+= 1
-            objectWillChange.send()
         }
     }
 
@@ -484,7 +491,6 @@ class WindowManager: ObservableObject {
         set {
             guard let layout = currentLayout else { return }
             layout.containerBounds = newValue
-            objectWillChange.send()
         }
     }
 
@@ -493,7 +499,6 @@ class WindowManager: ObservableObject {
         set {
             guard let layout = currentLayout else { return }
             layout.isActive = newValue
-            objectWillChange.send()
         }
     }
 
@@ -560,8 +565,6 @@ class WindowManager: ObservableObject {
             }
         }
 
-        // Notify SwiftUI of the change
-        objectWillChange.send()
     }
 
     /// Whether the config window is currently on screen.
@@ -1882,9 +1885,6 @@ class WindowManager: ObservableObject {
         newColumns[columnIndex] = newColumn
         columns = newColumns
 
-        // Force objectWillChange notification
-        objectWillChange.send()
-
         if isActive {
             applyLayout()
         }
@@ -1925,9 +1925,6 @@ class WindowManager: ObservableObject {
         newRows[rowIndex] = newRow
         rows = newRows
 
-        // Force objectWillChange notification
-        objectWillChange.send()
-
         if isActive {
             applyLayout()
         }
@@ -1964,7 +1961,6 @@ class WindowManager: ObservableObject {
         newColumns[columnIndex] = newColumn
         columns = newColumns
 
-        objectWillChange.send()
         refreshAvailableWindows()
 
         if isActive {
@@ -2003,7 +1999,6 @@ class WindowManager: ObservableObject {
         newRows[rowIndex] = newRow
         rows = newRows
 
-        objectWillChange.send()
         refreshAvailableWindows()
 
         if isActive {
@@ -2470,7 +2465,6 @@ class WindowManager: ObservableObject {
     private func finishStartManaging(layout: MonitorLayout) {
         layout.isActive = true
         layout.appState = .active
-        objectWillChange.send()
 
         // Apply initial layout and store expected frames
         applyLayoutAndUpdateExpected(for: layout)
@@ -2670,7 +2664,6 @@ class WindowManager: ObservableObject {
         guard let layout = currentLayout else { return }
 
         layout.isActive = false
-        objectWillChange.send()
 
         // Stop window observer
         layout.windowObserver?.stopObserving()
@@ -2715,7 +2708,6 @@ class WindowManager: ObservableObject {
             setupWindowObserver(for: layout)
         }
         startMaintenanceTimerIfNeeded()
-        objectWillChange.send()
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
     }
 
@@ -2733,7 +2725,6 @@ class WindowManager: ObservableObject {
         }
         stopMaintenanceTimerIfIdle()
         MonitorHighlightWindow.hide()
-        objectWillChange.send()
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
     }
 
@@ -2941,7 +2932,6 @@ class WindowManager: ObservableObject {
             removeClosedCell(cellId, in: layout)
         }
         refreshAvailableWindows()
-        objectWillChange.send()
     }
 
     /// A window counts as gone only when its frame is unreadable AND the owning
@@ -3892,7 +3882,6 @@ class WindowManager: ObservableObject {
         }
 
         layout.appState = .configuring
-        objectWillChange.send()
     }
 
     /// Rebuild a split from its saved form, matching each leaf back to a live

@@ -121,7 +121,7 @@ enum AppRelaunch {
 // MARK: - Trial Expired Overlay
 
 struct TrialExpiredOverlay: View {
-    @ObservedObject var licenseManager: LicenseManager
+    let licenseManager: LicenseManager
     @State private var enteredKey: String = ""
 
     var body: some View {
@@ -183,8 +183,8 @@ struct TrialExpiredOverlay: View {
 }
 
 struct ContentView: View {
-    @EnvironmentObject var windowManager: WindowManager
-    @StateObject private var licenseManager = LicenseManager.shared
+    @Environment(WindowManager.self) private var windowManager
+    private let licenseManager = LicenseManager.shared
     @State private var hasAccessibilityPermission = false
     @State private var permissionTimer: Timer?
 
@@ -295,7 +295,7 @@ struct ContentView: View {
 // MARK: - Layout Mode Picker View
 
 struct LayoutModePickerView: View {
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var hoveredMode: LayoutMode?
 
     var body: some View {
@@ -469,7 +469,7 @@ struct LayoutModePreviewIcon: View {
 // MARK: - Monitor Selection View
 
 struct MonitorSelectView: View {
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
 
     var body: some View {
         VStack(spacing: 30) {
@@ -497,7 +497,7 @@ struct MonitorSelectView: View {
 }
 
 struct MonitorLayoutPreview: View {
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     var onSelectMonitor: ((Monitor) -> Void)?
     @State private var hoveredMonitorId: String?
 
@@ -600,7 +600,7 @@ extension View {
 // MARK: - Monitor Tabs
 
 struct MonitorTabs: View {
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var hoveredMonitorId: String?
 
     var body: some View {
@@ -688,7 +688,7 @@ struct MonitorTab: View {
 // MARK: - Configure Layout View
 
 struct ConfigureLayoutView: View {
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var selectedIndex: Int = 0
     @State private var showingWindowPicker = false
     @State private var useCurrentLayout: Bool = true  // Use scanned layout by default
@@ -839,7 +839,7 @@ struct ConfigureLayoutView: View {
 }
 
 struct LayoutPreview: View {
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @Binding var selectedIndex: Int
 
     var body: some View {
@@ -924,7 +924,7 @@ struct ColumnPreview: View {
     let canRemove: Bool
     let onRemove: () -> Void
     let totalColumns: Int
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isDropTarget = false
 
     var body: some View {
@@ -1042,7 +1042,7 @@ struct WindowTilePreview: View {
     let columnIndex: Int
     let windowIndex: Int
     let heightProportion: CGFloat
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isHovered = false
 
     var body: some View {
@@ -1133,7 +1133,7 @@ struct NestedContainerPreview: View {
     let windowIndex: Int
     let isInColumn: Bool
     var rowIndex: Int? = nil
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isDropTarget = false
 
     var body: some View {
@@ -1233,7 +1233,7 @@ struct NestedWindowTile: View {
     let rowIndex: Int?
     let windowIndex: Int
     let isInColumn: Bool
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isDropTarget = false
 
     private var slot: WindowSlot {
@@ -1324,7 +1324,7 @@ struct NestedDividerHandle: View {
     let isInColumn: Bool
     /// On-screen size of the split this divider sits in, along the drag axis.
     let containerSize: CGFloat
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isDragging = false
     @State private var initialProp1: CGFloat = 0
     @State private var initialProp2: CGFloat = 0
@@ -1414,7 +1414,7 @@ struct NestedDropZone: View {
     let rowIndex: Int?
     let windowIndex: Int
     let isInColumn: Bool
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isDropTarget = false
 
     /// The cell holding the split this zone adds to.
@@ -1471,7 +1471,7 @@ struct ColumnDividerHandle: View {
     /// meaningless to the layout model without it — the model stores proportions,
     /// and the preview is a different size from the monitor it represents.
     let trackWidth: CGFloat
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isDragging = false
     @State private var initialFirst: CGFloat = 0
     @State private var initialSecond: CGFloat = 0
@@ -1536,7 +1536,7 @@ struct RowDividerHandle: View {
     let dividerIndex: Int
     /// On-screen height of the track the stacked windows are drawn in.
     let trackHeight: CGFloat
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isDragging = false
     @State private var initialFirst: CGFloat = 0
     @State private var initialSecond: CGFloat = 0
@@ -1600,7 +1600,7 @@ struct RowPreview: View {
     let canRemove: Bool
     let onRemove: () -> Void
     let totalRows: Int
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isDropTarget = false
 
     var body: some View {
@@ -1719,7 +1719,7 @@ struct RowWindowTilePreview: View {
     let rowIndex: Int
     let windowIndex: Int
     let widthProportion: CGFloat
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isHovered = false
 
     var body: some View {
@@ -1812,7 +1812,7 @@ struct RowPrimaryDividerHandle: View {
     let dividerIndex: Int
     /// On-screen height of the track the rows are drawn in.
     let trackHeight: CGFloat
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isDragging = false
     @State private var initialFirst: CGFloat = 0
     @State private var initialSecond: CGFloat = 0
@@ -1870,7 +1870,7 @@ struct RowWindowDividerHandle: View {
     let dividerIndex: Int
     /// On-screen width of the track the side-by-side windows are drawn in.
     let trackWidth: CGFloat
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isDragging = false
     @State private var initialFirst: CGFloat = 0
     @State private var initialSecond: CGFloat = 0
@@ -1927,7 +1927,7 @@ struct RowWindowDividerHandle: View {
 // MARK: - Window Picker Sidebar
 
 struct WindowPickerSidebar: View {
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @Binding var selectedIndex: Int
     @State private var showingAppPicker = false
 
@@ -1991,13 +1991,13 @@ struct WindowPickerSidebar: View {
         .background(Color(nsColor: .controlBackgroundColor))
         .sheet(isPresented: $showingAppPicker) {
             PlaceholderAppPicker(targetIndex: selectedIndex)
-                .environmentObject(windowManager)
+                .environment(windowManager)
         }
     }
 }
 
 struct PlaceholderAppPicker: View {
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @Environment(\.dismiss) var dismiss
     let targetIndex: Int
 
@@ -2080,7 +2080,7 @@ struct PlaceholderAppPicker: View {
 struct AvailableWindowRow: View {
     let window: ExternalWindow
     let targetIndex: Int
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
 
     var body: some View {
         Button {
@@ -2129,7 +2129,7 @@ struct AvailableWindowRow: View {
 // MARK: - Active Layout View
 
 struct ActiveLayoutView: View {
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2177,7 +2177,7 @@ struct ActiveLayoutView: View {
 }
 
 struct ActiveLayoutPreview: View {
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
 
     var body: some View {
         GeometryReader { geometry in
@@ -2249,7 +2249,7 @@ struct ActiveWindowTile: View {
     let columnWindow: ColumnWindow
     let columnIndex: Int
     let windowIndex: Int
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
 
     var body: some View {
         Group {
@@ -2287,7 +2287,7 @@ struct ActiveRowWindowTile: View {
     let rowWindow: RowWindow
     let rowIndex: Int
     let windowIndex: Int
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
 
     var body: some View {
         Group {
@@ -2329,7 +2329,7 @@ struct ActiveNestedContainerTile: View {
     var columnIndex: Int? = nil
     var rowIndex: Int? = nil
     var windowIndex: Int = 0
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
 
     var body: some View {
         GeometryReader { geometry in
@@ -2414,7 +2414,7 @@ struct ActiveNestedDivider: View {
     let isHorizontal: Bool  // true = horizontal layout (vertical divider line)
     let isColumn: Bool
     let containerSize: CGFloat
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var isDragging = false
     @State private var initialProp1: CGFloat = 0
     @State private var initialProp2: CGFloat = 0
@@ -2501,7 +2501,7 @@ struct ActiveNestedDivider: View {
 // MARK: - Layout Save/Load Menu
 
 struct LayoutMenu: View {
-    @EnvironmentObject var windowManager: WindowManager
+    @Environment(WindowManager.self) private var windowManager
     @State private var showingSaveDialog = false
     @State private var layoutName = ""
     @State private var saveAsWorkspace = false
@@ -2648,7 +2648,7 @@ struct LayoutMenu: View {
 // MARK: - Settings
 
 struct SettingsView: View {
-    @StateObject private var licenseManager = LicenseManager.shared
+    private let licenseManager = LicenseManager.shared
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var enteredKey: String = ""
 
@@ -2826,5 +2826,5 @@ enum LaunchAtLogin {
 
 #Preview {
     ContentView()
-        .environmentObject(WindowManager.shared)
+        .environment(WindowManager.shared)
 }

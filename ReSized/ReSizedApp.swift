@@ -10,7 +10,7 @@ struct ReSizedApp: App {
     var body: some Scene {
         Window("ReSized", id: "main") {
             ContentView()
-                .environmentObject(WindowManager.shared)
+                .environment(WindowManager.shared)
                 .onAppear {
                     // Store openWindow action for use from AppDelegate
                     AppDelegate.openWindowAction = { [openWindow] in

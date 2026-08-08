@@ -11,8 +11,9 @@ enum LicenseState {
 
 // MARK: - License Manager
 
-class LicenseManager: ObservableObject {
-    static let shared = LicenseManager()
+@Observable
+class LicenseManager {
+    @ObservationIgnored static let shared = LicenseManager()
 
     /// Master switch for the whole trial/licensing system.
     ///
@@ -33,10 +34,10 @@ class LicenseManager: ObservableObject {
     let storeURL = "https://resized.lemonsqueezy.com/buy/748344"  // Update with your actual store URL
     let productID = "748344"
 
-    @Published var licenseState: LicenseState = .trial(daysRemaining: 7)
-    @Published var licenseKey: String = ""
-    @Published var isValidating: Bool = false
-    @Published var validationError: String?
+    var licenseState: LicenseState = .trial(daysRemaining: 7)
+    var licenseKey: String = ""
+    var isValidating: Bool = false
+    var validationError: String?
 
     init() {
         guard Self.isEnabled else {
@@ -104,7 +105,6 @@ class LicenseManager: ObservableObject {
         } else {
             licenseState = .trial(daysRemaining: trialDaysRemaining)
         }
-        objectWillChange.send()
     }
 
     var canUseApp: Bool {
