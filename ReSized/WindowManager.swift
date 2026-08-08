@@ -3388,14 +3388,18 @@ class WindowManager {
                     if let window = cell.window {
                         var actual = place(window, in: frame)
 
-                        // Pin the outer edges: if an app cannot fill the last slot,
-                        // push it flush to the screen edge rather than leaving a
-                        // strip of desktop showing.
+                        // Pin the outer edges both ways: an app that cannot
+                        // FILL the last slot is pushed flush to the screen edge
+                        // rather than leaving desktop showing, and one that
+                        // cannot SHRINK to it (Finder's minimum height) is
+                        // pulled back on screen rather than hanging off the
+                        // bottom — it overlaps its neighbour instead, which at
+                        // least stays visible.
                         var adjusted = actual
-                        if isLastColumn, actual.width < intendedWidth {
+                        if isLastColumn, actual.width != intendedWidth {
                             adjusted.origin.x = bounds.maxX - actual.width
                         }
-                        if isLastWindow, actual.height < intendedHeight {
+                        if isLastWindow, actual.height != intendedHeight {
                             adjusted.origin.y = bounds.minY
                         }
                         if adjusted.origin != actual.origin {
@@ -3444,11 +3448,12 @@ class WindowManager {
                     if let window = cell.window {
                         var actual = place(window, in: frame)
 
+                        // Same both-ways edge pinning as the columns pass.
                         var adjusted = actual
-                        if isLastWindow, actual.width < intendedWidth {
+                        if isLastWindow, actual.width != intendedWidth {
                             adjusted.origin.x = bounds.maxX - actual.width
                         }
-                        if isLastRow, actual.height < intendedHeight {
+                        if isLastRow, actual.height != intendedHeight {
                             adjusted.origin.y = bounds.minY
                         }
                         if adjusted.origin != actual.origin {
