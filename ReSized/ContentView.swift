@@ -13,6 +13,27 @@ import ServiceManagement
 /// the mouse was released.
 let dragToken = "resized.window" as NSString
 
+/// The item AppKit drags around.
+///
+/// Built with an explicit type identifier rather than NSItemProvider(object:),
+/// which picks its own — and if what it picks isn't the type the drop declares,
+/// the drag still highlights but the drop is silently refused.
+func makeDragItem() -> NSItemProvider {
+    NSItemProvider(item: dragToken, typeIdentifier: UTType.plainText.identifier)
+}
+
+/// Transient drag state, kept in a class so the drop delegate holds one stable
+/// reference to it.
+///
+/// It cannot be @State on the view: the delegate would capture a Binding, and
+/// updating it from dropUpdated — which happens on every mouse move — rebuilds
+/// the view, hands onDrop a freshly-made delegate mid-drag, and the drop lands
+/// on a delegate that is no longer the one AppKit is talking to.
+@Observable
+final class SeamDragState {
+    var highlighted: LayoutSeam?
+}
+
 // MARK: - Seam Model
 
 /// A boundary a dragged window can be inserted at, and where to draw it.
@@ -169,30 +190,32 @@ func buildSeams(from tiles: [TileFrame], columnsMode: Bool) -> [LayoutSeam] {
 /// single question — which seam is nearest — and an answer visible on screen
 /// before the mouse is released.
 struct SeamDropDelegate: DropDelegate {
-    let seams: [LayoutSeam]
+    /// Read when needed rather than captured, so a layout change mid-drag can't
+    /// leave the delegate deciding against seams that have moved.
+    let seams: () -> [LayoutSeam]
     let windowManager: WindowManager
-    @Binding var highlighted: LayoutSeam?
+    let state: SeamDragState
 
     func validateDrop(info: DropInfo) -> Bool {
         windowManager.pendingDrag != nil
     }
 
     func dropEntered(info: DropInfo) {
-        highlighted = nearestSeam(to: info.location)
+        state.highlighted = nearestSeam(to: info.location)
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        highlighted = nearestSeam(to: info.location)
+        state.highlighted = nearestSeam(to: info.location)
         return DropProposal(operation: .move)
     }
 
     func dropExited(info: DropInfo) {
-        highlighted = nil
+        state.highlighted = nil
     }
 
     func performDrop(info: DropInfo) -> Bool {
         defer {
-            highlighted = nil
+            state.highlighted = nil
             windowManager.pendingDrag = nil
         }
         guard let drag = windowManager.pendingDrag,
@@ -203,7 +226,18 @@ struct SeamDropDelegate: DropDelegate {
     }
 
     private func nearestSeam(to point: CGPoint) -> LayoutSeam? {
-        seams.min { $0.distance(to: point) < $1.distance(to: point) }
+        seams().min { $0.distance(to: point) < $1.distance(to: point) }
+    }
+}
+
+/// Draws the highlight, and is the only thing that rebuilds as it moves.
+struct SeamHighlightOverlay: View {
+    let state: SeamDragState
+
+    var body: some View {
+        if let seam = state.highlighted {
+            SeamHighlight(seam: seam)
+        }
     }
 }
 
@@ -1039,27 +1073,25 @@ struct LayoutPreview: View {
     @Environment(WindowManager.self) private var windowManager
     @Binding var selectedIndex: Int
     @State private var tileFrames: [TileFrame] = []
-    @State private var highlightedSeam: LayoutSeam?
-
-    private var seams: [LayoutSeam] {
-        buildSeams(from: tileFrames, columnsMode: windowManager.layoutMode == .columns)
-    }
+    @State private var dragState = SeamDragState()
 
     var body: some View {
         grid
             .coordinateSpace(name: Self.gridSpace)
             .onPreferenceChange(TileFramesKey.self) { tileFrames = $0 }
-            .overlay {
-                if let highlightedSeam {
-                    SeamHighlight(seam: highlightedSeam)
-                }
-            }
+            // The highlight is read inside its own view, deliberately. Reading
+            // it here would make every mouse move during a drag rebuild this
+            // body — and with it the drop delegate AppKit is mid-conversation
+            // with.
+            .overlay { SeamHighlightOverlay(state: dragState) }
             .onDrop(
                 of: [.plainText],
                 delegate: SeamDropDelegate(
-                    seams: seams,
+                    seams: { [tileFrames, columnsMode = windowManager.layoutMode == .columns] in
+                        buildSeams(from: tileFrames, columnsMode: columnsMode)
+                    },
                     windowManager: windowManager,
-                    highlighted: $highlightedSeam
+                    state: dragState
                 )
             )
     }
@@ -1317,7 +1349,7 @@ struct WindowTilePreview: View {
         }
         .onDrag {
             windowManager.pendingDrag = .placed(slot)
-            return NSItemProvider(object: dragToken)
+            return makeDragItem()
         }
     }
 
@@ -1469,7 +1501,7 @@ struct NestedWindowTile: View {
         .reportTileFrame(slot, splitDirection: splitDirection)
         .onDrag {
             windowManager.pendingDrag = .placed(slot)
-            return NSItemProvider(object: dragToken)
+            return makeDragItem()
         }
     }
 
@@ -1914,7 +1946,7 @@ struct RowWindowTilePreview: View {
             .background(colorForApp(window.ownerName))
             .onDrag {
                 windowManager.pendingDrag = .placed(slot)
-                return NSItemProvider(object: dragToken)
+                return makeDragItem()
             }
 
             // Split button (vertical split to add sub-rows)
@@ -2253,7 +2285,7 @@ struct AvailableWindowRow: View {
             )
             .onDrag {
                 windowManager.pendingDrag = .available(window.id)
-                return NSItemProvider(object: dragToken)
+                return makeDragItem()
             }
         }
         .buttonStyle(.plain)
