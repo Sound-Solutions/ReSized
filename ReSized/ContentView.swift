@@ -1198,11 +1198,15 @@ struct NestedDividerHandle: View {
             .frame(width: isHorizontal ? 6 : nil, height: isHorizontal ? nil : 6)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture()
+                // .global for the same reason as the primary dividers: the handle
+                // moves with the split it controls, so a local-space translation
+                // measures against a frame that is chasing the cursor.
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
                         if !isDragging {
                             // Store initial proportions at drag start
                             isDragging = true
+                            windowManager.beginInteractiveResize()
                             if isInColumn, let colIndex = columnIndex {
                                 if let container = windowManager.columns[colIndex].windows[windowIndex].nestedContainer {
                                     initialProp1 = container.children[dividerIndex].proportion
@@ -1240,6 +1244,7 @@ struct NestedDividerHandle: View {
                     }
                     .onEnded { _ in
                         isDragging = false
+                        windowManager.endInteractiveResize()
                     }
             )
             .onHover { hovering in
@@ -1341,7 +1346,8 @@ struct ColumnDividerHandle: View {
     let trackWidth: CGFloat
     @EnvironmentObject var windowManager: WindowManager
     @State private var isDragging = false
-    @State private var lastTranslation: CGFloat = 0
+    @State private var initialFirst: CGFloat = 0
+    @State private var initialSecond: CGFloat = 0
 
     var body: some View {
         Rectangle()
@@ -1349,22 +1355,31 @@ struct ColumnDividerHandle: View {
             .frame(width: 8)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture()
+                // .global on purpose: the default .local space is the handle's own
+                // frame, and the handle travels with the divider as it resizes. In
+                // local space a divider that keeps up with the cursor sees its own
+                // translation collapse back to zero and stalls.
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        isDragging = true
-                        // translation is cumulative from the start of the gesture,
-                        // so send only what changed since the previous event.
-                        let step = value.translation.width - lastTranslation
-                        lastTranslation = value.translation.width
+                        if !isDragging {
+                            isDragging = true
+                            let columns = windowManager.columns
+                            guard dividerIndex + 1 < columns.count else { return }
+                            initialFirst = columns[dividerIndex].widthProportion
+                            initialSecond = columns[dividerIndex + 1].widthProportion
+                            windowManager.beginInteractiveResize()
+                        }
                         guard trackWidth > 0 else { return }
                         windowManager.resizeColumnDivider(
                             atIndex: dividerIndex,
-                            proportionalDelta: step / trackWidth
+                            initialFirst: initialFirst,
+                            initialSecond: initialSecond,
+                            proportionalTranslation: value.translation.width / trackWidth
                         )
                     }
                     .onEnded { _ in
                         isDragging = false
-                        lastTranslation = 0
+                        windowManager.endInteractiveResize()
                     }
             )
             .onHover { hovering in
@@ -1384,7 +1399,8 @@ struct RowDividerHandle: View {
     let trackHeight: CGFloat
     @EnvironmentObject var windowManager: WindowManager
     @State private var isDragging = false
-    @State private var lastTranslation: CGFloat = 0
+    @State private var initialFirst: CGFloat = 0
+    @State private var initialSecond: CGFloat = 0
 
     var body: some View {
         Rectangle()
@@ -1392,21 +1408,29 @@ struct RowDividerHandle: View {
             .frame(height: 6)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture()
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        isDragging = true
-                        let step = value.translation.height - lastTranslation
-                        lastTranslation = value.translation.height
+                        if !isDragging {
+                            isDragging = true
+                            let columns = windowManager.columns
+                            guard columnIndex < columns.count,
+                                  dividerIndex + 1 < columns[columnIndex].windows.count else { return }
+                            initialFirst = columns[columnIndex].windows[dividerIndex].heightProportion
+                            initialSecond = columns[columnIndex].windows[dividerIndex + 1].heightProportion
+                            windowManager.beginInteractiveResize()
+                        }
                         guard trackHeight > 0 else { return }
                         windowManager.resizeRowDivider(
                             inColumn: columnIndex,
                             atIndex: dividerIndex,
-                            proportionalDelta: step / trackHeight
+                            initialFirst: initialFirst,
+                            initialSecond: initialSecond,
+                            proportionalTranslation: value.translation.height / trackHeight
                         )
                     }
                     .onEnded { _ in
                         isDragging = false
-                        lastTranslation = 0
+                        windowManager.endInteractiveResize()
                     }
             )
             .onHover { hovering in
@@ -1632,7 +1656,8 @@ struct RowPrimaryDividerHandle: View {
     let trackHeight: CGFloat
     @EnvironmentObject var windowManager: WindowManager
     @State private var isDragging = false
-    @State private var lastTranslation: CGFloat = 0
+    @State private var initialFirst: CGFloat = 0
+    @State private var initialSecond: CGFloat = 0
 
     var body: some View {
         Rectangle()
@@ -1640,20 +1665,27 @@ struct RowPrimaryDividerHandle: View {
             .frame(height: 8)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture()
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        isDragging = true
-                        let step = value.translation.height - lastTranslation
-                        lastTranslation = value.translation.height
+                        if !isDragging {
+                            isDragging = true
+                            let rows = windowManager.rows
+                            guard dividerIndex + 1 < rows.count else { return }
+                            initialFirst = rows[dividerIndex].heightProportion
+                            initialSecond = rows[dividerIndex + 1].heightProportion
+                            windowManager.beginInteractiveResize()
+                        }
                         guard trackHeight > 0 else { return }
                         windowManager.resizeRowPrimaryDivider(
                             atIndex: dividerIndex,
-                            proportionalDelta: step / trackHeight
+                            initialFirst: initialFirst,
+                            initialSecond: initialSecond,
+                            proportionalTranslation: value.translation.height / trackHeight
                         )
                     }
                     .onEnded { _ in
                         isDragging = false
-                        lastTranslation = 0
+                        windowManager.endInteractiveResize()
                     }
             )
             .onHover { hovering in
@@ -1674,7 +1706,8 @@ struct RowWindowDividerHandle: View {
     let trackWidth: CGFloat
     @EnvironmentObject var windowManager: WindowManager
     @State private var isDragging = false
-    @State private var lastTranslation: CGFloat = 0
+    @State private var initialFirst: CGFloat = 0
+    @State private var initialSecond: CGFloat = 0
 
     var body: some View {
         Rectangle()
@@ -1682,21 +1715,29 @@ struct RowWindowDividerHandle: View {
             .frame(width: 6)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture()
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        isDragging = true
-                        let step = value.translation.width - lastTranslation
-                        lastTranslation = value.translation.width
+                        if !isDragging {
+                            isDragging = true
+                            let rows = windowManager.rows
+                            guard rowIndex < rows.count,
+                                  dividerIndex + 1 < rows[rowIndex].windows.count else { return }
+                            initialFirst = rows[rowIndex].windows[dividerIndex].widthProportion
+                            initialSecond = rows[rowIndex].windows[dividerIndex + 1].widthProportion
+                            windowManager.beginInteractiveResize()
+                        }
                         guard trackWidth > 0 else { return }
                         windowManager.resizeWindowDivider(
                             inRow: rowIndex,
                             atIndex: dividerIndex,
-                            proportionalDelta: step / trackWidth
+                            initialFirst: initialFirst,
+                            initialSecond: initialSecond,
+                            proportionalTranslation: value.translation.width / trackWidth
                         )
                     }
                     .onEnded { _ in
                         isDragging = false
-                        lastTranslation = 0
+                        windowManager.endInteractiveResize()
                     }
             )
             .onHover { hovering in
@@ -2215,11 +2256,15 @@ struct ActiveNestedDivider: View {
             .frame(width: isHorizontal ? 4 : nil, height: isHorizontal ? nil : 4)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture()
+                // .global for the same reason as the primary dividers: the handle
+                // moves with the split it controls, so a local-space translation
+                // measures against a frame that is chasing the cursor.
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
                         if !isDragging {
                             // Store initial proportions at drag start
                             isDragging = true
+                            windowManager.beginInteractiveResize()
                             if isColumn, let colIndex = columnIndex {
                                 if let container = windowManager.columns[colIndex].windows[windowIndex].nestedContainer {
                                     initialProp1 = container.children[dividerIndex].proportion
@@ -2257,6 +2302,7 @@ struct ActiveNestedDivider: View {
                     }
                     .onEnded { _ in
                         isDragging = false
+                        windowManager.endInteractiveResize()
                     }
             )
             .onHover { hovering in

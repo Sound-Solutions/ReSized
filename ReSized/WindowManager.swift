@@ -407,12 +407,14 @@ class WindowManager: ObservableObject {
     /// they're stale without re-deriving a signature on every single read.
     private var layoutRevision: Int = 0
 
-    /// Live drags call applyLayout on every gesture event, and each apply is a
-    /// burst of synchronous cross-process AX writes. Collapse them to at most one
-    /// per interval, last one wins.
-    private var pendingApply = false
-    private var lastApplyTime: Date = .distantPast
-    private static let applyThrottleInterval: TimeInterval = 1.0 / 30.0
+    /// True while a divider is being dragged.
+    ///
+    /// While dragging we update the model only: the SwiftUI preview follows the
+    /// cursor smoothly and no real window is touched. Commanding N foreign apps
+    /// to resize over synchronous AX at 30Hz can never look smooth — each app
+    /// relayouts on its own schedule, some snap to size increments, and you see
+    /// every intermediate state. So real windows move exactly once, on release.
+    private var isInteracting = false
 
     /// One low-frequency timer shared by every active layout — see
     /// startMaintenanceTimerIfNeeded() for why this is not a display link.
@@ -420,7 +422,16 @@ class WindowManager: ObservableObject {
     private static let maintenanceInterval: TimeInterval = 1.0
 
     /// How long to ignore window events after we move windows ourselves.
-    private static let eventSuppressionInterval: TimeInterval = 0.25
+    ///
+    /// Short on purpose: this only needs to swallow notifications already in
+    /// flight when the write returns. Recognising our own work is expectedFrames'
+    /// job now that those hold actual frames rather than requested ones. At 0.25s
+    /// this went blind mid-drag and then lurched.
+    private static let eventSuppressionInterval: TimeInterval = 0.05
+
+    /// Coalesces reflows while the user is dragging a real window's edge.
+    private var reflowWorkItem: DispatchWorkItem?
+    private static let reflowDebounceInterval: TimeInterval = 0.12
 
     // MARK: - Computed Properties (proxy to current monitor's layout)
 
@@ -1494,257 +1505,153 @@ class WindowManager: ObservableObject {
         return (clamped, total - clamped)
     }
 
-    /// Resize a column divider (between columnIndex and columnIndex+1)
-    /// This affects all windows in both adjacent columns.
-    /// `proportionalDelta` is the change since the previous drag event expressed as a
-    /// fraction of the track the columns are drawn in — not a pixel distance. The
-    /// caller owns that conversion because only it knows the on-screen track size.
-    func resizeColumnDivider(atIndex dividerIndex: Int, proportionalDelta: CGFloat) {
+    /// Begin an interactive divider drag. Real windows stop being touched until
+    /// endInteractiveResize().
+    func beginInteractiveResize() {
+        isInteracting = true
+    }
+
+    /// Finish an interactive drag and commit the result to the real windows in a
+    /// single authoritative apply.
+    func endInteractiveResize() {
+        guard isInteracting else { return }
+        isInteracting = false
+        guard isActive else { return }
+        applyLayout()
+    }
+
+    /// Push the model to real windows, unless a drag is in flight — in which case
+    /// the commit happens on release instead.
+    private func applyLayoutUnlessInteracting() {
+        guard isActive, !isInteracting else { return }
+        applyLayout()
+    }
+
+    /// Resize a column divider (between columnIndex and columnIndex+1).
+    ///
+    /// Takes the proportions captured when the drag began plus the total
+    /// translation since, rather than a per-event delta. Absolute beats
+    /// incremental here: no accumulated rounding, and dragging back out of a
+    /// clamp returns exactly where you started. `proportionalTranslation` is a
+    /// fraction of the on-screen track — the caller owns that conversion because
+    /// only it knows how big the track is.
+    func resizeColumnDivider(
+        atIndex dividerIndex: Int,
+        initialFirst: CGFloat,
+        initialSecond: CGFloat,
+        proportionalTranslation: CGFloat
+    ) {
         guard dividerIndex >= 0, dividerIndex + 1 < columns.count else { return }
 
-        var updated = columns
         guard let (left, right) = Self.resolveSplit(
-            first: updated[dividerIndex].widthProportion,
-            second: updated[dividerIndex + 1].widthProportion,
-            delta: proportionalDelta
+            first: initialFirst,
+            second: initialSecond,
+            delta: proportionalTranslation
         ) else { return }
 
+        var updated = columns
         updated[dividerIndex].widthProportion = left
         updated[dividerIndex + 1].widthProportion = right
         columns = updated
 
         normalizeColumnProportions()
-
-        if isActive {
-            applyLayoutThrottled()
-        }
+        applyLayoutUnlessInteracting()
     }
 
     /// Resize a row divider within a column (between windowIndex and windowIndex+1)
     /// This only affects the two adjacent windows in that column
-    func resizeRowDivider(inColumn columnIndex: Int, atIndex dividerIndex: Int, proportionalDelta: CGFloat) {
+    func resizeRowDivider(
+        inColumn columnIndex: Int,
+        atIndex dividerIndex: Int,
+        initialFirst: CGFloat,
+        initialSecond: CGFloat,
+        proportionalTranslation: CGFloat
+    ) {
         guard columnIndex >= 0, columnIndex < columns.count else { return }
         guard dividerIndex >= 0, dividerIndex + 1 < columns[columnIndex].windows.count else { return }
 
-        var updated = columns
         guard let (top, bottom) = Self.resolveSplit(
-            first: updated[columnIndex].windows[dividerIndex].heightProportion,
-            second: updated[columnIndex].windows[dividerIndex + 1].heightProportion,
-            delta: proportionalDelta
+            first: initialFirst,
+            second: initialSecond,
+            delta: proportionalTranslation
         ) else { return }
 
+        var updated = columns
         updated[columnIndex].windows[dividerIndex].heightProportion = top
         updated[columnIndex].windows[dividerIndex + 1].heightProportion = bottom
         columns = updated
 
         normalizeWindowProportions(inColumn: columnIndex)
-
-        if isActive {
-            applyLayoutThrottled()
-        }
+        applyLayoutUnlessInteracting()
     }
 
     // MARK: - Row Mode Resizing
 
     /// Resize the primary divider between rows (affects row heights)
-    func resizeRowPrimaryDivider(atIndex dividerIndex: Int, proportionalDelta: CGFloat) {
+    func resizeRowPrimaryDivider(
+        atIndex dividerIndex: Int,
+        initialFirst: CGFloat,
+        initialSecond: CGFloat,
+        proportionalTranslation: CGFloat
+    ) {
         guard dividerIndex >= 0, dividerIndex + 1 < rows.count else { return }
 
-        var updated = rows
         guard let (top, bottom) = Self.resolveSplit(
-            first: updated[dividerIndex].heightProportion,
-            second: updated[dividerIndex + 1].heightProportion,
-            delta: proportionalDelta
+            first: initialFirst,
+            second: initialSecond,
+            delta: proportionalTranslation
         ) else { return }
 
+        var updated = rows
         updated[dividerIndex].heightProportion = top
         updated[dividerIndex + 1].heightProportion = bottom
         rows = updated
 
         normalizeRowProportions()
-
-        if isActive {
-            applyLayoutThrottled()
-        }
+        applyLayoutUnlessInteracting()
     }
 
     /// Resize a window divider within a row (between windowIndex and windowIndex+1)
     /// This only affects the two adjacent windows in that row
-    func resizeWindowDivider(inRow rowIndex: Int, atIndex dividerIndex: Int, proportionalDelta: CGFloat) {
+    func resizeWindowDivider(
+        inRow rowIndex: Int,
+        atIndex dividerIndex: Int,
+        initialFirst: CGFloat,
+        initialSecond: CGFloat,
+        proportionalTranslation: CGFloat
+    ) {
         guard rowIndex >= 0, rowIndex < rows.count else { return }
         guard dividerIndex >= 0, dividerIndex + 1 < rows[rowIndex].windows.count else { return }
 
-        var updated = rows
         guard let (left, right) = Self.resolveSplit(
-            first: updated[rowIndex].windows[dividerIndex].widthProportion,
-            second: updated[rowIndex].windows[dividerIndex + 1].widthProportion,
-            delta: proportionalDelta
+            first: initialFirst,
+            second: initialSecond,
+            delta: proportionalTranslation
         ) else { return }
 
+        var updated = rows
         updated[rowIndex].windows[dividerIndex].widthProportion = left
         updated[rowIndex].windows[dividerIndex + 1].widthProportion = right
         rows = updated
 
         normalizeWindowProportions(inRow: rowIndex)
-
-        if isActive {
-            applyLayoutThrottled()
-        }
+        applyLayoutUnlessInteracting()
     }
 
     // MARK: - Layout Application
 
-    /// Apply the current layout to actual windows
+    /// Apply the current layout to actual windows.
+    ///
+    /// This used to have its own copy of the placement maths, separate from
+    /// applyLayoutForMonitor — which is how only one of the two ended up pinning
+    /// the outer edges. There is now one implementation.
     func applyLayout() {
-        switch layoutMode {
-        case .columns:
-            applyColumnsLayout()
-        case .rows:
-            applyRowsLayout()
-        }
+        guard let layout = currentLayout else { return }
+        let placed = applyLayoutForMonitor(layout)
 
-        // Keep the observer's baseline in step with what we just did, and don't
-        // let our own writes bounce back in as user resizes.
-        if let layout = currentLayout, layout.isActive {
-            updateExpectedFrames(for: layout)
+        if layout.isActive {
+            layout.expectedFrames = placed
             armEventSuppression(for: layout)
-        }
-    }
-
-    /// Apply column-based layout (vertical primary divisions)
-    private func applyColumnsLayout() {
-        var currentX = containerBounds.minX
-        let rightEdge = containerBounds.maxX
-        let bottomEdge = containerBounds.minY
-
-        for (colIndex, column) in columns.enumerated() {
-            let isLastColumn = (colIndex == columns.count - 1)
-
-            // Last column fills to right edge exactly to avoid gaps
-            let columnWidth: CGFloat
-            if isLastColumn {
-                columnWidth = rightEdge - currentX
-            } else {
-                columnWidth = column.widthProportion * containerBounds.width
-            }
-
-            // Start from top of screen (maxY) and work down
-            // In macOS, Y=0 is at bottom, so higher Y = higher on screen
-            var currentTop = containerBounds.maxY
-
-            for (winIndex, columnWindow) in column.windows.enumerated() {
-                let isLastWindow = (winIndex == column.windows.count - 1)
-
-                // Last window fills to bottom edge exactly to avoid gaps
-                let windowHeight: CGFloat
-                if isLastWindow {
-                    windowHeight = currentTop - bottomEdge
-                } else {
-                    windowHeight = columnWindow.heightProportion * containerBounds.height
-                }
-
-                // Window origin is bottom-left, so y = top - height
-                var frame = CGRect(
-                    x: currentX,
-                    y: currentTop - windowHeight,
-                    width: columnWidth,
-                    height: windowHeight
-                )
-
-                if let window = columnWindow.window {
-                    // Single window - position it directly
-                    frame = constrainFrame(frame, for: window)
-
-                    // For last column, keep right edge aligned (adjust x if width was constrained)
-                    if isLastColumn && frame.width < columnWidth {
-                        frame.origin.x = rightEdge - frame.width
-                    }
-
-                    // For last window, keep bottom edge aligned (adjust y if height was constrained)
-                    if isLastWindow && frame.height < windowHeight {
-                        frame.origin.y = bottomEdge
-                    }
-
-                    _ = window.setFrame(frame)
-                } else if let container = columnWindow.nestedContainer {
-                    // Nested container - position all children
-                    applyNestedContainerLayout(container: container, in: frame)
-                }
-
-                // Move down for next window
-                currentTop -= windowHeight
-            }
-
-            currentX += columnWidth
-        }
-    }
-
-    /// Apply row-based layout (horizontal primary divisions)
-    private func applyRowsLayout() {
-        // Start from top of screen and work down
-        var currentTop = containerBounds.maxY
-        let bottomEdge = containerBounds.minY
-        let rightEdge = containerBounds.maxX
-
-        for (rowIndex, row) in rows.enumerated() {
-            let isLastRow = (rowIndex == rows.count - 1)
-
-            // Last row fills to bottom edge exactly to avoid gaps
-            let rowHeight: CGFloat
-            if isLastRow {
-                rowHeight = currentTop - bottomEdge
-            } else {
-                rowHeight = row.heightProportion * containerBounds.height
-            }
-
-            // Start from left edge and work right
-            var currentX = containerBounds.minX
-
-            for (winIndex, rowWindow) in row.windows.enumerated() {
-                let isLastWindow = (winIndex == row.windows.count - 1)
-
-                // Last window fills to right edge exactly to avoid gaps
-                let windowWidth: CGFloat
-                if isLastWindow {
-                    windowWidth = rightEdge - currentX
-                } else {
-                    windowWidth = rowWindow.widthProportion * containerBounds.width
-                }
-
-                // Window origin is bottom-left, so y = top - height
-                var frame = CGRect(
-                    x: currentX,
-                    y: currentTop - rowHeight,
-                    width: windowWidth,
-                    height: rowHeight
-                )
-
-                if let window = rowWindow.window {
-                    // Single window - position it directly
-                    frame = constrainFrame(frame, for: window)
-
-                    // For last window in row, keep right edge aligned
-                    if isLastWindow && frame.width < windowWidth {
-                        frame.origin.x = rightEdge - frame.width
-                    }
-
-                    // For last row, keep bottom edge aligned
-                    if isLastRow && frame.height < rowHeight {
-                        frame.origin.y = bottomEdge
-                    }
-
-                    _ = window.setFrame(frame)
-                } else if let container = rowWindow.nestedContainer {
-                    // Nested container - position all children
-                    applyNestedContainerLayout(container: container, in: frame)
-                }
-
-                // Move right for next window
-                currentX += windowWidth
-            }
-
-            // Move down for next row
-            currentTop -= rowHeight
         }
     }
 
@@ -2087,9 +1994,7 @@ class WindowManager: ObservableObject {
         newColumns[columnIndex] = newColumn
         columns = newColumns
 
-        if isActive {
-            applyLayoutThrottled()
-        }
+        applyLayoutUnlessInteracting()
     }
 
     /// Resize divider within a nested container in a row (using initial proportions)
@@ -2130,9 +2035,7 @@ class WindowManager: ObservableObject {
         newRows[rowIndex] = newRow
         rows = newRows
 
-        if isActive {
-            applyLayoutThrottled()
-        }
+        applyLayoutUnlessInteracting()
     }
 
     // MARK: - Active Management
@@ -2256,8 +2159,26 @@ class WindowManager: ObservableObject {
                                       windowIndex: change.winIndex, delta: change.delta)
             }
 
-            applyLayoutAndUpdateExpected(for: layout)
+            scheduleReflow(for: layout)
         }
+    }
+
+    /// Reflow the rest of the layout once the user stops dragging a real window's
+    /// edge, rather than on every notification.
+    ///
+    /// Dragging a window edge emits a stream of resize notifications, and
+    /// re-applying the whole layout on each one meant every other window was
+    /// commanded to move dozens of times a second while you dragged — the same
+    /// reason divider drags now only commit on release.
+    private func scheduleReflow(for layout: MonitorLayout) {
+        reflowWorkItem?.cancel()
+
+        let item = DispatchWorkItem { [weak self, weak layout] in
+            guard let self, let layout, layout.isActive else { return }
+            self.applyLayoutAndUpdateExpected(for: layout)
+        }
+        reflowWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.reflowDebounceInterval, execute: item)
     }
 
     /// Start the shared maintenance timer if it isn't already running.
@@ -2370,168 +2291,166 @@ class WindowManager: ObservableObject {
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
     }
 
-    /// Apply layout for a specific monitor (used by startAllLayouts)
-    private func applyLayoutForMonitor(_ layout: MonitorLayout) {
+    /// Set a window's frame and report what it actually became, in the same
+    /// NSScreen coordinate space the layout maths uses.
+    ///
+    /// Apps routinely refuse the size they are handed — Terminal snaps to
+    /// character cells, plenty of apps have minimum widths, some are fixed
+    /// aspect. Callers use the real result to butt the next pane against this
+    /// one instead of leaving the shortfall as a visible gap.
+    private func place(_ window: ExternalWindow, in frame: CGRect) -> CGRect {
+        let target = constrainFrame(frame, for: window)
+        window.setFrame(target)
+
+        guard let actualAX = ExternalWindow.getFrame(from: window.axElement) else { return target }
+        return convertFrameFromAXCoordinates(actualAX)
+    }
+
+    /// Apply a layout to real windows, returning the frame each cell's window
+    /// actually ended up with, keyed by cell id.
+    ///
+    /// Panes are placed in order, and each starts where the previous one really
+    /// ended rather than where it was asked to end. The old version advanced by
+    /// the requested size no matter what the app did with it, so any shortfall
+    /// became a permanent gap at the seam.
+    @discardableResult
+    private func applyLayoutForMonitor(_ layout: MonitorLayout) -> [UUID: CGRect] {
         let bounds = layout.containerBounds
-        guard bounds.width > 0 && bounds.height > 0 else { return }
+        var placed: [UUID: CGRect] = [:]
+        guard bounds.width > 0, bounds.height > 0 else { return placed }
 
         switch layout.layoutMode {
         case .columns:
             var currentX = bounds.minX
+
             for (colIndex, column) in layout.columns.enumerated() {
                 let isLastColumn = (colIndex == layout.columns.count - 1)
-                let columnWidth = isLastColumn ? (bounds.maxX - currentX) : (column.widthProportion * bounds.width)
+                let intendedWidth = isLastColumn
+                    ? max(0, bounds.maxX - currentX)
+                    : column.widthProportion * bounds.width
 
                 var currentTop = bounds.maxY
-                for (winIndex, colWindow) in column.windows.enumerated() {
-                    let isLastWindow = (winIndex == column.windows.count - 1)
-                    let windowHeight = isLastWindow ? (currentTop - bounds.minY) : (colWindow.heightProportion * bounds.height)
+                var columnWidth: CGFloat = 0
 
-                    let frame = CGRect(x: currentX, y: currentTop - windowHeight, width: columnWidth, height: windowHeight)
-                    if let window = colWindow.window {
-                        let constrained = constrainFrame(frame, for: window)
-                        _ = window.setFrame(constrained)
-                    } else if let container = colWindow.nestedContainer {
+                for (winIndex, cell) in column.windows.enumerated() {
+                    let isLastWindow = (winIndex == column.windows.count - 1)
+                    let intendedHeight = isLastWindow
+                        ? max(0, currentTop - bounds.minY)
+                        : cell.heightProportion * bounds.height
+
+                    let frame = CGRect(
+                        x: currentX,
+                        y: currentTop - intendedHeight,
+                        width: intendedWidth,
+                        height: intendedHeight
+                    )
+
+                    if let window = cell.window {
+                        var actual = place(window, in: frame)
+
+                        // Pin the outer edges: if an app cannot fill the last slot,
+                        // push it flush to the screen edge rather than leaving a
+                        // strip of desktop showing.
+                        var adjusted = actual
+                        if isLastColumn, actual.width < intendedWidth {
+                            adjusted.origin.x = bounds.maxX - actual.width
+                        }
+                        if isLastWindow, actual.height < intendedHeight {
+                            adjusted.origin.y = bounds.minY
+                        }
+                        if adjusted.origin != actual.origin {
+                            window.setFrame(adjusted)
+                            actual = adjusted
+                        }
+
+                        placed[cell.id] = actual
+                        currentTop -= actual.height
+                        columnWidth = max(columnWidth, actual.width)
+                    } else if let container = cell.nestedContainer {
                         applyNestedContainerLayout(container: container, in: frame)
+                        currentTop -= intendedHeight
+                        columnWidth = max(columnWidth, intendedWidth)
                     }
-                    currentTop -= windowHeight
                 }
-                currentX += columnWidth
+
+                currentX += (columnWidth > 0 ? columnWidth : intendedWidth)
             }
 
         case .rows:
             var currentTop = bounds.maxY
+
             for (rowIndex, row) in layout.rows.enumerated() {
                 let isLastRow = (rowIndex == layout.rows.count - 1)
-                let rowHeight = isLastRow ? (currentTop - bounds.minY) : (row.heightProportion * bounds.height)
+                let intendedHeight = isLastRow
+                    ? max(0, currentTop - bounds.minY)
+                    : row.heightProportion * bounds.height
 
                 var currentX = bounds.minX
-                for (winIndex, rowWindow) in row.windows.enumerated() {
-                    let isLastWindow = (winIndex == row.windows.count - 1)
-                    let windowWidth = isLastWindow ? (bounds.maxX - currentX) : (rowWindow.widthProportion * bounds.width)
+                var rowHeight: CGFloat = 0
 
-                    let frame = CGRect(x: currentX, y: currentTop - rowHeight, width: windowWidth, height: rowHeight)
-                    if let window = rowWindow.window {
-                        let constrained = constrainFrame(frame, for: window)
-                        _ = window.setFrame(constrained)
-                    } else if let container = rowWindow.nestedContainer {
+                for (winIndex, cell) in row.windows.enumerated() {
+                    let isLastWindow = (winIndex == row.windows.count - 1)
+                    let intendedWidth = isLastWindow
+                        ? max(0, bounds.maxX - currentX)
+                        : cell.widthProportion * bounds.width
+
+                    let frame = CGRect(
+                        x: currentX,
+                        y: currentTop - intendedHeight,
+                        width: intendedWidth,
+                        height: intendedHeight
+                    )
+
+                    if let window = cell.window {
+                        var actual = place(window, in: frame)
+
+                        var adjusted = actual
+                        if isLastWindow, actual.width < intendedWidth {
+                            adjusted.origin.x = bounds.maxX - actual.width
+                        }
+                        if isLastRow, actual.height < intendedHeight {
+                            adjusted.origin.y = bounds.minY
+                        }
+                        if adjusted.origin != actual.origin {
+                            window.setFrame(adjusted)
+                            actual = adjusted
+                        }
+
+                        placed[cell.id] = actual
+                        currentX += actual.width
+                        rowHeight = max(rowHeight, actual.height)
+                    } else if let container = cell.nestedContainer {
                         applyNestedContainerLayout(container: container, in: frame)
+                        currentX += intendedWidth
+                        rowHeight = max(rowHeight, intendedHeight)
                     }
-                    currentX += windowWidth
                 }
-                currentTop -= rowHeight
+
+                currentTop -= (rowHeight > 0 ? rowHeight : intendedHeight)
             }
         }
+
+        return placed
     }
 
     private func applyLayoutAndUpdateExpected(for layout: MonitorLayout) {
-        applyLayoutForMonitor(layout)
-        updateExpectedFrames(for: layout)
+        // expectedFrames now holds what the windows ACTUALLY became, not what we
+        // asked for. Incoming notifications are judged against these, so an app
+        // that lands slightly off (size increments) no longer reads as a user
+        // resize and no longer triggers a corrective re-apply.
+        layout.expectedFrames = applyLayoutForMonitor(layout)
         armEventSuppression(for: layout)
     }
 
     /// Briefly ignore incoming move/resize notifications, so the windows we just
     /// moved don't read back as user edits.
+    ///
+    /// This only has to cover notifications already in flight when we finish
+    /// writing — recognising our own work is expectedFrames' job. It was long
+    /// enough to be a problem: while you dragged a real window's edge the app
+    /// went blind for a quarter second and then lurched to catch up.
     private func armEventSuppression(for layout: MonitorLayout) {
         layout.suppressEventsUntil = Date().addingTimeInterval(Self.eventSuppressionInterval)
-    }
-
-    /// Recompute the frame we believe each managed window now occupies. Incoming
-    /// window events are judged against these, so every path that moves windows
-    /// has to refresh them — including live divider drags, which previously left
-    /// them stale and so made each drag look like a user resize to undo.
-    private func updateExpectedFrames(for layout: MonitorLayout) {
-        layout.expectedFrames.removeAll()
-
-        switch layout.layoutMode {
-        case .columns:
-            var currentX = layout.containerBounds.minX
-            let rightEdge = layout.containerBounds.maxX
-            let bottomEdge = layout.containerBounds.minY
-
-            for (colIndex, column) in layout.columns.enumerated() {
-                let isLastColumn = (colIndex == layout.columns.count - 1)
-
-                let columnWidth: CGFloat
-                if isLastColumn {
-                    columnWidth = rightEdge - currentX
-                } else {
-                    columnWidth = column.widthProportion * layout.containerBounds.width
-                }
-
-                var currentTop = layout.containerBounds.maxY
-
-                for (winIndex, colWindow) in column.windows.enumerated() {
-                    let isLastWindow = (winIndex == column.windows.count - 1)
-
-                    let windowHeight: CGFloat
-                    if isLastWindow {
-                        windowHeight = currentTop - bottomEdge
-                    } else {
-                        windowHeight = colWindow.heightProportion * layout.containerBounds.height
-                    }
-
-                    var expectedFrame = CGRect(
-                        x: currentX,
-                        y: currentTop - windowHeight,
-                        width: columnWidth,
-                        height: windowHeight
-                    )
-                    // Constrain expected frame to window's min/max size to avoid perpetual sync
-                    if let window = colWindow.window {
-                        expectedFrame = constrainFrame(expectedFrame, for: window)
-                        layout.expectedFrames[colWindow.id] = expectedFrame
-                    }
-                    // TODO: Handle nested container expected frames
-                    currentTop -= windowHeight
-                }
-                currentX += columnWidth
-            }
-
-        case .rows:
-            var currentTop = layout.containerBounds.maxY
-            let bottomEdge = layout.containerBounds.minY
-            let rightEdge = layout.containerBounds.maxX
-
-            for (rowIndex, row) in layout.rows.enumerated() {
-                let isLastRow = (rowIndex == layout.rows.count - 1)
-
-                let rowHeight: CGFloat
-                if isLastRow {
-                    rowHeight = currentTop - bottomEdge
-                } else {
-                    rowHeight = row.heightProportion * layout.containerBounds.height
-                }
-
-                var currentX = layout.containerBounds.minX
-
-                for (winIndex, rowWindow) in row.windows.enumerated() {
-                    let isLastWindow = (winIndex == row.windows.count - 1)
-
-                    let windowWidth: CGFloat
-                    if isLastWindow {
-                        windowWidth = rightEdge - currentX
-                    } else {
-                        windowWidth = rowWindow.widthProportion * layout.containerBounds.width
-                    }
-
-                    var expectedFrame = CGRect(
-                        x: currentX,
-                        y: currentTop - rowHeight,
-                        width: windowWidth,
-                        height: rowHeight
-                    )
-                    // Constrain expected frame to window's min/max size to avoid perpetual sync
-                    if let window = rowWindow.window {
-                        expectedFrame = constrainFrame(expectedFrame, for: window)
-                        layout.expectedFrames[rowWindow.id] = expectedFrame
-                    }
-                    // TODO: Handle nested container expected frames
-                    currentX += windowWidth
-                }
-                currentTop -= rowHeight
-            }
-        }
     }
 
     /// Convert NSScreen frame to AX coordinates for comparison
@@ -2540,6 +2459,11 @@ class WindowManager: ObservableObject {
         let screenHeight = mainScreen.frame.height
         let axY = screenHeight - frame.origin.y - frame.height
         return CGRect(x: frame.origin.x, y: axY, width: frame.width, height: frame.height)
+    }
+
+    /// The Y flip is its own inverse; this exists so call sites read as intent.
+    private func convertFrameFromAXCoordinates(_ frame: CGRect) -> CGRect {
+        convertFrameToAXCoordinates(frame)
     }
 
     private func checkForClosedWindows(in layout: MonitorLayout) {
@@ -2868,26 +2792,6 @@ class WindowManager: ObservableObject {
         guard !uniqueApps.isEmpty else { return }
         for (index, name) in uniqueApps.enumerated() {
             hueCache[name] = Double(index) / Double(uniqueApps.count)
-        }
-    }
-
-    /// Coalescing wrapper around applyLayout for gesture-driven callers.
-    func applyLayoutThrottled() {
-        guard !pendingApply else { return }
-
-        let elapsed = Date().timeIntervalSince(lastApplyTime)
-        guard elapsed < Self.applyThrottleInterval else {
-            applyLayout()
-            lastApplyTime = Date()
-            return
-        }
-
-        pendingApply = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + (Self.applyThrottleInterval - elapsed)) { [weak self] in
-            guard let self else { return }
-            self.pendingApply = false
-            self.applyLayout()
-            self.lastApplyTime = Date()
         }
     }
 
