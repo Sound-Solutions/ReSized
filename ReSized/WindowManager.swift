@@ -1822,6 +1822,7 @@ class WindowManager {
             // that starts a layout. Without this they stayed wherever they were
             // when the layout began.
             refreshSeamOverlay(for: layout)
+            refreshWindowObserver(for: layout)
         }
     }
 
@@ -2919,11 +2920,9 @@ class WindowManager {
         layout.isActive = true
         layout.appState = .active
 
-        // Apply initial layout and store expected frames
+        // Apply initial layout and store expected frames. This also registers
+        // the windows for event-driven observation, which replaces polling.
         applyLayoutAndUpdateExpected(for: layout)
-
-        // Set up event-driven window observation (replaces constant polling)
-        setupWindowObserver(for: layout)
 
         // Shared 1Hz timer handles closed-window detection for every active layout
         startMaintenanceTimerIfNeeded()
@@ -2932,15 +2931,29 @@ class WindowManager {
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
     }
 
-    private func setupWindowObserver(for layout: MonitorLayout) {
-        // Get all windows being managed in this layout
-        let windows = getAllManagedWindows(in: layout)
-        guard !windows.isEmpty else { return }
+    /// Point the layout's observer at whatever windows it holds right now.
+    ///
+    /// Registration used to happen once, when the layout started, so a window
+    /// added to a running layout produced no move/resize notifications at all:
+    /// its seam handles went stale and dragging its edge did nothing. This runs
+    /// from every path that applies a layout instead, and is cheap to repeat —
+    /// the observer diffs its own registrations, so an unchanged window set
+    /// costs a scan and nothing else.
+    private func refreshWindowObserver(for layout: MonitorLayout) {
+        guard layout.isActive else { return }
 
-        // Create observer that fires callback when windows move/resize
-        layout.windowObserver = WindowObserver { [weak self, weak layout] element in
-            guard let self = self, let layout = layout, layout.isActive else { return }
-            self.handleWindowEvent(element: element, for: layout)
+        let windows = getAllManagedWindows(in: layout)
+        guard !windows.isEmpty else {
+            layout.windowObserver?.stopObserving()
+            layout.windowObserver = nil
+            return
+        }
+
+        if layout.windowObserver == nil {
+            layout.windowObserver = WindowObserver { [weak self, weak layout] element in
+                guard let self = self, let layout = layout, layout.isActive else { return }
+                self.handleWindowEvent(element: element, for: layout)
+            }
         }
 
         layout.windowObserver?.observeWindows(windows)
@@ -3170,10 +3183,8 @@ class WindowManager {
             // applyLayoutAndUpdateExpected applies the layout itself — calling
             // applyLayoutForMonitor first as well meant every start moved every
             // window twice.
+            // This also registers the windows for event-driven observation.
             applyLayoutAndUpdateExpected(for: layout)
-
-            // Set up event-driven window observation
-            setupWindowObserver(for: layout)
         }
         startMaintenanceTimerIfNeeded()
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
@@ -3347,6 +3358,7 @@ class WindowManager {
         layout.expectedFrames = applyLayoutForMonitor(layout)
         armEventSuppression(for: layout)
         refreshSeamOverlay(for: layout)
+        refreshWindowObserver(for: layout)
     }
 
     /// Briefly ignore incoming move/resize notifications, so the windows we just

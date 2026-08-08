@@ -373,47 +373,77 @@ class WindowObserver {
         stopObserving()
     }
 
+    /// Watch exactly `windows`, adding and removing only what actually changed.
+    ///
+    /// Callers run this on every layout apply, not just when a layout starts, so
+    /// a window added to a live layout gets notifications too. That makes it a
+    /// hot path: rebuilding wholesale would tear down and recreate every
+    /// AXObserver on each divider drag, so this diffs against what is already
+    /// registered and does nothing at all when the set is unchanged.
     func observeWindows(_ windows: [ExternalWindow]) {
-        stopObserving() // Clean up any existing observers
+        let isWanted: (AXUIElement) -> Bool = { element in
+            windows.contains { CFEqual($0.axElement, element) }
+        }
 
-        // Group by PID - each process needs its own observer
-        let byPID = Dictionary(grouping: windows, by: { $0.ownerPID })
+        // Drop the ones that have left the layout.
+        for entry in observedElements where !isWanted(entry.element) {
+            guard let observer = observers[entry.pid] else { continue }
+            AXObserverRemoveNotification(observer, entry.element, kAXMovedNotification as CFString)
+            AXObserverRemoveNotification(observer, entry.element, kAXResizedNotification as CFString)
+        }
+        observedElements.removeAll { !isWanted($0.element) }
 
-        for (pid, windowsForPID) in byPID {
-            var obs: AXObserver?
-            let result = AXObserverCreate(pid, { (observer, element, notification, refcon) in
-                guard let refcon = refcon else { return }
-                let this = Unmanaged<WindowObserver>.fromOpaque(refcon).takeUnretainedValue()
-                this.handleNotification(element: element, notification: notification as String)
-            }, &obs)
+        // Register the ones that are new.
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        for window in windows
+        where !observedElements.contains(where: { CFEqual($0.element, window.axElement) }) {
+            guard let observer = observer(for: window.ownerPID) else { continue }
 
-            guard result == .success, let observer = obs else {
-                print("Failed to create observer for PID \(pid)")
-                continue
+            let addMoved = AXObserverAddNotification(observer, window.axElement, kAXMovedNotification as CFString, refcon)
+            let addResized = AXObserverAddNotification(observer, window.axElement, kAXResizedNotification as CFString, refcon)
+
+            if addMoved == .success || addResized == .success {
+                observedElements.append((window.axElement, window.ownerPID))
             }
+        }
 
-            let refcon = Unmanaged.passUnretained(self).toOpaque()
-
-            for window in windowsForPID {
-                let addMoved = AXObserverAddNotification(observer, window.axElement, kAXMovedNotification as CFString, refcon)
-                let addResized = AXObserverAddNotification(observer, window.axElement, kAXResizedNotification as CFString, refcon)
-
-                if addMoved == .success || addResized == .success {
-                    observedElements.append((window.axElement, pid))
-                }
-            }
-
-            // Add observer to run loop
-            CFRunLoopAddSource(
+        // Retire the observers for processes with nothing left to watch — which
+        // includes any created just above whose notifications all failed.
+        for (pid, observer) in observers
+        where !observedElements.contains(where: { $0.pid == pid }) {
+            CFRunLoopRemoveSource(
                 CFRunLoopGetMain(),
                 AXObserverGetRunLoopSource(observer),
                 .defaultMode
             )
+            observers.removeValue(forKey: pid)
+        }
+    }
 
-            observers[pid] = observer
+    /// The observer for a process, created and hooked to the run loop on first
+    /// use. Each process needs its own.
+    private func observer(for pid: pid_t) -> AXObserver? {
+        if let existing = observers[pid] { return existing }
+
+        var obs: AXObserver?
+        let result = AXObserverCreate(pid, { (observer, element, notification, refcon) in
+            guard let refcon = refcon else { return }
+            let this = Unmanaged<WindowObserver>.fromOpaque(refcon).takeUnretainedValue()
+            this.handleNotification(element: element, notification: notification as String)
+        }, &obs)
+
+        guard result == .success, let observer = obs else {
+            print("Failed to create observer for PID \(pid)")
+            return nil
         }
 
-        print("WindowObserver: Watching \(observedElements.count) windows across \(observers.count) apps")
+        CFRunLoopAddSource(
+            CFRunLoopGetMain(),
+            AXObserverGetRunLoopSource(observer),
+            .defaultMode
+        )
+        observers[pid] = observer
+        return observer
     }
 
     private func handleNotification(element: AXUIElement, notification: String) {
