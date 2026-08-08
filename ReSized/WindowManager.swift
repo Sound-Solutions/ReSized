@@ -1148,8 +1148,17 @@ class WindowManager {
         return .tangle(windows)
     }
 
-    /// Split a set of windows at every gap that no window straddles, or nil if
-    /// there is no such gap.
+    /// How far a window may straddle a cut and still count as being on the far
+    /// side of it. Windows with minimum sizes get pinned over their neighbours
+    /// rather than off screen, so a real column boundary can have a stubborn
+    /// window (Webex's minimum width) intruding across it — an arrangement a
+    /// human still reads as two columns. Bounded both absolutely and as a
+    /// share of the window's own span, so genuinely layered windows still
+    /// refuse to separate and come back as a tangle.
+    private static let cutForgiveness: CGFloat = 100
+
+    /// Split a set of windows at every gap that no window straddles more than
+    /// the forgiveness allows, or nil if there is no such gap.
     private static func separate(_ windows: [ExternalWindow], vertical: Bool) -> [[ExternalWindow]]? {
         // AX coordinates put minY at the top, so sorting ascending is
         // left-to-right or top-to-bottom either way.
@@ -1164,7 +1173,10 @@ class WindowManager {
 
         for window in sorted.dropFirst() {
             let start = vertical ? window.frame.minX : window.frame.minY
-            if start >= edge - edgeTolerance {
+            let span = vertical ? window.frame.width : window.frame.height
+            let intrusion = edge - start
+            if intrusion <= edgeTolerance
+                || (intrusion <= Self.cutForgiveness && intrusion < span * 0.25) {
                 groups.append(current)
                 current = [window]
                 edge = vertical ? window.frame.maxX : window.frame.maxY
