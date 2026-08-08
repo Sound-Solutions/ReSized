@@ -70,9 +70,10 @@ func cellDropRegion(
     guard extent > 0 else { return .inside }
 
     // Proportional so it scales with the preview, floored so it stays hittable
-    // in a narrow cell, and capped at a third so the middle always wins the
-    // majority of the area.
-    let strip = min(extent / 3, max(18, extent * 0.22))
+    // in a narrow cell, and capped at a quarter so the middle keeps a clear
+    // majority — a cell with a strip on each side gives away twice whatever
+    // this is, and "into this cell" is the more common intent.
+    let strip = min(extent / 4, max(16, extent * 0.18))
 
     if touchesBefore, position < strip { return .before }
     if touchesAfter, position > extent - strip { return .after }
@@ -1325,13 +1326,7 @@ struct NestedContainerPreview: View {
                 columnIndex: columnIndex,
                 rowIndex: rowIndex,
                 windowIndex: windowIndex,
-                isInColumn: isInColumn,
-                zoneSize: zoneSize,
-                // The zone is last, so it holds the trailing edge and never the
-                // leading one — unless the split runs across the cell axis, in
-                // which case it spans the cell and touches both.
-                touchesBefore: !splitRunsAlongCellAxis,
-                touchesAfter: true
+                isInColumn: isInColumn
             )
             .frame(width: zoneSize.width, height: zoneSize.height)
         }
@@ -1565,16 +1560,8 @@ struct NestedDropZone: View {
     let rowIndex: Int?
     let windowIndex: Int
     let isInColumn: Bool
-    /// See NestedWindowTile — the empty half of a split is an edge of the cell
-    /// too, so a drop near its outer edge means "beside the cell", not "into
-    /// the split".
-    let zoneSize: CGSize
-    let touchesBefore: Bool
-    let touchesAfter: Bool
     @Environment(WindowManager.self) private var windowManager
     @State private var isDropTarget = false
-
-    private var cellAxisHorizontal: Bool { !isInColumn }
 
     /// The cell holding the split this zone adds to.
     private var slot: WindowSlot {
@@ -1637,24 +1624,14 @@ struct NestedDropZone: View {
 
             // Anything already placed: a plain cell from another column or row,
             // or a pane lifted out of some other split.
+            //
+            // Every point in this box means "join the split" — no edge strips.
+            // The box exists for exactly one purpose, so there is no competing
+            // meaning to disambiguate, and carving insertion strips out of it
+            // only made its declared job unreliable near its own borders.
+            // Panes and plain tiles carry the edge strips instead.
             guard let source = dragData.sourceSlot else { return false }
-
-            switch cellDropRegion(
-                at: location,
-                in: zoneSize,
-                horizontal: cellAxisHorizontal,
-                touchesBefore: touchesBefore,
-                touchesAfter: touchesAfter
-            ) {
-            case .before:
-                windowManager.moveWindow(from: source, insertingAt: windowIndex,
-                                         columnIndex: columnIndex, rowIndex: rowIndex)
-            case .after:
-                windowManager.moveWindow(from: source, insertingAt: windowIndex + 1,
-                                         columnIndex: columnIndex, rowIndex: rowIndex)
-            case .inside:
-                windowManager.moveWindow(from: source, intoSplitAt: slot)
-            }
+            windowManager.moveWindow(from: source, intoSplitAt: slot)
             return true
         } isTargeted: { isTargeted in
             isDropTarget = isTargeted
