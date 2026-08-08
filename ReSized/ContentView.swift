@@ -48,23 +48,36 @@ final class SeamDragState {
     /// it came up. A drag runs its own event-tracking loop and swallows the
     /// events on the way past, so neither a local nor a global event monitor
     /// ever sees the release.
-    func watchForDragEnd(_ clear: @escaping () -> Void) {
+    func watchForDragEnd(clearHighlight: @escaping () -> Void, clearDrag: @escaping () -> Void) {
         guard watchdog == nil else { return }
 
-        var settledTicks = 0
-        watchdog = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        var quietTicks = 0
+        let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
             guard NSEvent.pressedMouseButtons == 0 else {
-                settledTicks = 0
+                quietTicks = 0
                 return
             }
-            // A drop that lands reports on the same release, so give it a tick
-            // to do its own cleanup before assuming the drag was abandoned.
-            settledTicks += 1
-            guard settledTicks >= 2 else { return }
+            quietTicks += 1
 
+            // The highlight is only a hint about where the window is going, so
+            // it goes the instant the button does. Waiting on the rest of the
+            // cleanup left it on screen after the window had already landed.
+            if quietTicks == 1 { clearHighlight() }
+
+            // The pending drag is what a landing drop reads, and that lands on
+            // this same release — so it gets a little room before being taken
+            // away as abandoned.
+            guard quietTicks >= 8 else { return }
             self?.stopWatching()
-            clear()
+            clearDrag()
         }
+
+        // .common, not the default mode. A drag puts the run loop into event
+        // tracking, and a timer scheduled the usual way is frozen for exactly
+        // as long as the drag lasts — so it only started counting after the
+        // release it was supposed to be watching for.
+        RunLoop.main.add(timer, forMode: .common)
+        watchdog = timer
     }
 
     func stopWatching() {
@@ -241,10 +254,10 @@ struct SeamDropDelegate: DropDelegate {
 
     func dropEntered(info: DropInfo) {
         state.highlighted = nearestSeam(to: info.location)
-        state.watchForDragEnd { [state, windowManager] in
-            state.highlighted = nil
-            windowManager.pendingDrag = nil
-        }
+        state.watchForDragEnd(
+            clearHighlight: { [state] in state.highlighted = nil },
+            clearDrag: { [windowManager] in windowManager.pendingDrag = nil }
+        )
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
