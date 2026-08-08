@@ -452,6 +452,11 @@ class WindowManager {
     /// screen is drawn from it.
     @ObservationIgnored var pendingDrag: PendingDrag?
 
+    /// The modifier-drag gesture: the tap that watches for it and the session
+    /// for a drag currently in flight. Bookkeeping, nothing rendered.
+    @ObservationIgnored var modifierDragMonitor: ModifierDragMonitor?
+    @ObservationIgnored var modifierDragSession: ModifierDragSession?
+
     @ObservationIgnored private var cancellables = Set<AnyCancellable>()
 
     /// Cache for app hue colors to avoid expensive recalculation on every render.
@@ -3023,6 +3028,7 @@ class WindowManager {
 
         // Shared 1Hz timer handles closed-window detection for every active layout
         startMaintenanceTimerIfNeeded()
+        startModifierDragMonitorIfNeeded()
 
         // Notify menu bar
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
@@ -3107,6 +3113,9 @@ class WindowManager {
         // same amount, so the resize handlers see no change in width or height,
         // adjust nothing, and leave the window wherever it was dropped.
         if isMove(delta) {
+            // A modifier-drag in flight owns this window; snapping it back
+            // mid-gesture would fight the user's hand. Release decides.
+            if modifierDragSession?.confirmedWindowDrag == true { return }
             reflowWorkItem?.cancel()
             applyLayoutAndUpdateExpected(for: layout)
             return
@@ -3257,6 +3266,7 @@ class WindowManager {
 
         layout.expectedFrames.removeAll()
         stopMaintenanceTimerIfIdle()
+        stopModifierDragMonitorIfIdle()
 
         // Show highlight again when not actively managing — but only if the
         // config window is actually open. Stopping from the menu bar with no
@@ -3292,6 +3302,7 @@ class WindowManager {
             applyLayoutAndUpdateExpected(for: layout)
         }
         startMaintenanceTimerIfNeeded()
+        startModifierDragMonitorIfNeeded()
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
     }
 
@@ -3309,6 +3320,7 @@ class WindowManager {
             layout.expectedFrames.removeAll()
         }
         stopMaintenanceTimerIfIdle()
+        stopModifierDragMonitorIfIdle()
         MonitorHighlightWindow.hide()
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
     }
@@ -3455,7 +3467,7 @@ class WindowManager {
         return placed
     }
 
-    private func applyLayoutAndUpdateExpected(for layout: MonitorLayout) {
+    func applyLayoutAndUpdateExpected(for layout: MonitorLayout) {
         // expectedFrames now holds what the windows ACTUALLY became, not what we
         // asked for. Incoming notifications are judged against these, so an app
         // that lands slightly off (size increments) no longer reads as a user
