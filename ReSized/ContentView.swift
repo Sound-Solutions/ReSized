@@ -33,43 +33,43 @@ func makeDragItem() -> NSItemProvider {
 final class SeamDragState {
     var highlighted: LayoutSeam?
 
-    @ObservationIgnored private var monitors: [Any] = []
+    @ObservationIgnored private var watchdog: Timer?
 
     /// Watch for the drag ending without the delegate being told.
     ///
     /// A drop delegate hears about the pointer leaving, and about a drop
     /// landing. It hears nothing when a drag is abandoned over the target —
     /// released somewhere that refuses it, or cancelled — and the highlight
-    /// then sits there pointing at a seam nothing is heading for.
+    /// then sits there pointing at a seam nothing is heading for. Worse, it is
+    /// drawn at fixed grid coordinates, so it stays put while the layout moves
+    /// on around it.
     ///
-    /// Both monitors are needed: the local one sees the mouse coming up inside
-    /// this app, the global one sees it anywhere else.
+    /// This asks whether a button is still down rather than waiting to be told
+    /// it came up. A drag runs its own event-tracking loop and swallows the
+    /// events on the way past, so neither a local nor a global event monitor
+    /// ever sees the release.
     func watchForDragEnd(_ clear: @escaping () -> Void) {
-        guard monitors.isEmpty else { return }
+        guard watchdog == nil else { return }
 
-        let ended: () -> Void = { [weak self] in
-            // A landing drop reports on this same mouse-up. Give it the chance
-            // to run first, then clear only what it left behind.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                self?.stopWatching()
-                clear()
+        var settledTicks = 0
+        watchdog = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard NSEvent.pressedMouseButtons == 0 else {
+                settledTicks = 0
+                return
             }
-        }
+            // A drop that lands reports on the same release, so give it a tick
+            // to do its own cleanup before assuming the drag was abandoned.
+            settledTicks += 1
+            guard settledTicks >= 2 else { return }
 
-        if let local = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { event in
-            ended()
-            return event
-        } {
-            monitors.append(local)
-        }
-        if let global = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp], handler: { _ in ended() }) {
-            monitors.append(global)
+            self?.stopWatching()
+            clear()
         }
     }
 
     func stopWatching() {
-        monitors.forEach(NSEvent.removeMonitor)
-        monitors.removeAll()
+        watchdog?.invalidate()
+        watchdog = nil
     }
 }
 
@@ -1126,7 +1126,18 @@ struct LayoutPreview: View {
     var body: some View {
         grid
             .coordinateSpace(name: Self.gridSpace)
-            .onPreferenceChange(TileFramesKey.self) { tileFrames = $0 }
+            .onPreferenceChange(TileFramesKey.self) { frames in
+                tileFrames = frames
+                // The highlight is drawn at fixed grid coordinates, so anything
+                // left over from a finished drag ends up pointing into the
+                // middle of whatever moved into that spot. If the tiles have
+                // moved and no button is down, there is no drag it could belong
+                // to.
+                if NSEvent.pressedMouseButtons == 0 {
+                    dragState.stopWatching()
+                    dragState.highlighted = nil
+                }
+            }
             // The highlight is read inside its own view, deliberately. Reading
             // it here would make every mouse move during a drag rebuild this
             // body — and with it the drop delegate AppKit is mid-conversation
