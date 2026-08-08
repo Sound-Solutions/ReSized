@@ -2596,6 +2596,39 @@ class WindowManager {
         }
     }
 
+    /// Place a window that is not in any layout — the desktop drop's path for
+    /// pulling an unmanaged window into the grid. place(_:at:) wants a
+    /// PendingDrag naming a window already known to the picker; this one takes
+    /// the window itself.
+    func place(_ window: ExternalWindow, at destination: SeamDestination) {
+        insert(window, at: destination)
+    }
+
+    /// Put a window into a brand-new column at `index`, everything sharing
+    /// equally — the desktop counterpart of dropping past the layout's edge.
+    func insertColumn(with window: ExternalWindow, at index: Int) {
+        var newColumns = columns
+        let landing = max(0, min(index, newColumns.count))
+        newColumns.insert(Column(widthProportion: 0, windows: [ColumnWindow(window: window)]), at: landing)
+        let share = 1.0 / CGFloat(newColumns.count)
+        for i in newColumns.indices { newColumns[i].widthProportion = share }
+        columns = newColumns
+        refreshAvailableWindows()
+        applyLayoutIfActive()
+    }
+
+    /// Row twin of insertColumn(with:at:).
+    func insertRow(with window: ExternalWindow, at index: Int) {
+        var newRows = rows
+        let landing = max(0, min(index, newRows.count))
+        newRows.insert(Row(heightProportion: 0, windows: [RowWindow(window: window)]), at: landing)
+        let share = 1.0 / CGFloat(newRows.count)
+        for i in newRows.indices { newRows[i].heightProportion = share }
+        rows = newRows
+        refreshAvailableWindows()
+        applyLayoutIfActive()
+    }
+
     /// Move a pane to a different position within its own split.
     ///
     /// `toSeam` is a boundary index — n+1 of them for n panes — so dropping
