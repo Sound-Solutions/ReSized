@@ -1213,6 +1213,7 @@ struct NestedContainerPreview: View {
     }
 
     private func handleNestedDrop(dragData: WindowDragData) {
+
         // Dragging from sidebar
         if let externalWindowId = dragData.externalWindowId,
            let window = windowManager.availableWindows.first(where: { $0.id == externalWindowId }) {
@@ -1455,6 +1456,13 @@ struct NestedDropZone: View {
                 .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
                 .foregroundStyle(isDropTarget ? Color.accentColor : Color(nsColor: .separatorColor))
         )
+        // The zone is a dashed outline, and a stroked shape's hit region is the
+        // stroke itself — its interior is transparent to hit-testing. Without an
+        // explicit shape, drops in the middle of the box fell straight through to
+        // the row behind it, which then reordered cells instead of filling the
+        // split. Verified from a drop logged at a point provably inside the box
+        // that the row, not the zone, received.
+        .contentShape(Rectangle())
         .dropDestination(for: WindowDragData.self) { items, _ in
             guard let dragData = items.first else { return false }
 
