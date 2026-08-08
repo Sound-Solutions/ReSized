@@ -32,6 +32,45 @@ func makeDragItem() -> NSItemProvider {
 @Observable
 final class SeamDragState {
     var highlighted: LayoutSeam?
+
+    @ObservationIgnored private var monitors: [Any] = []
+
+    /// Watch for the drag ending without the delegate being told.
+    ///
+    /// A drop delegate hears about the pointer leaving, and about a drop
+    /// landing. It hears nothing when a drag is abandoned over the target —
+    /// released somewhere that refuses it, or cancelled — and the highlight
+    /// then sits there pointing at a seam nothing is heading for.
+    ///
+    /// Both monitors are needed: the local one sees the mouse coming up inside
+    /// this app, the global one sees it anywhere else.
+    func watchForDragEnd(_ clear: @escaping () -> Void) {
+        guard monitors.isEmpty else { return }
+
+        let ended: () -> Void = { [weak self] in
+            // A landing drop reports on this same mouse-up. Give it the chance
+            // to run first, then clear only what it left behind.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                self?.stopWatching()
+                clear()
+            }
+        }
+
+        if let local = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { event in
+            ended()
+            return event
+        } {
+            monitors.append(local)
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp], handler: { _ in ended() }) {
+            monitors.append(global)
+        }
+    }
+
+    func stopWatching() {
+        monitors.forEach(NSEvent.removeMonitor)
+        monitors.removeAll()
+    }
 }
 
 // MARK: - Seam Model
@@ -202,6 +241,10 @@ struct SeamDropDelegate: DropDelegate {
 
     func dropEntered(info: DropInfo) {
         state.highlighted = nearestSeam(to: info.location)
+        state.watchForDragEnd { [state, windowManager] in
+            state.highlighted = nil
+            windowManager.pendingDrag = nil
+        }
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -213,11 +256,13 @@ struct SeamDropDelegate: DropDelegate {
     }
 
     func dropExited(info: DropInfo) {
+        state.stopWatching()
         state.highlighted = nil
     }
 
     func performDrop(info: DropInfo) -> Bool {
         defer {
+            state.stopWatching()
             state.highlighted = nil
             windowManager.pendingDrag = nil
         }
