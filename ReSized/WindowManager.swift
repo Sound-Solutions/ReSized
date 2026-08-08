@@ -3052,6 +3052,7 @@ class WindowManager {
         // screen until the maintenance timer next fires. The sweep re-checks
         // with the window server, so a mere AX timeout removes nothing.
         guard let currentFrame = ExternalWindow.getFrame(from: element) else {
+            AccessibilityHelper.logDebug("event with unreadable frame -> sweep (destroyed notification or AX timeout)")
             checkForClosedWindows(in: layout)
             return
         }
@@ -3481,6 +3482,8 @@ class WindowManager {
 
         guard !closedCellIds.isEmpty || prunedNested else { return }
 
+        AccessibilityHelper.logDebug("prune: removing \(closedCellIds.count) cell(s), prunedNested=\(prunedNested), reflowing")
+
         for cellId in closedCellIds {
             removeClosedCell(cellId, in: layout)
         }
@@ -3502,12 +3505,23 @@ class WindowManager {
     /// empty layouts overnight. The server still lists the window through both.
     private func isWindowGone(_ window: ExternalWindow) -> Bool {
         guard ExternalWindow.getFrame(from: window.axElement) == nil else { return false }
-        if kill(window.ownerPID, 0) != 0 { return true }
+        if kill(window.ownerPID, 0) != 0 {
+            AccessibilityHelper.logDebug("gone(pid-dead): \(window.ownerName) '\(window.title)' wid=\(window.windowID.map(String.init) ?? "nil")")
+            return true
+        }
 
         guard let windowID = window.windowID,
               let descriptions = CGWindowListCreateDescriptionFromArray([windowID] as CFArray) as? [[String: Any]]
-        else { return false }
-        return descriptions.isEmpty
+        else {
+            AccessibilityHelper.logDebug("frame unreadable, kept (no wid/desc): \(window.ownerName) '\(window.title)'")
+            return false
+        }
+        if descriptions.isEmpty {
+            AccessibilityHelper.logDebug("gone(server): \(window.ownerName) '\(window.title)' wid=\(windowID)")
+            return true
+        }
+        AccessibilityHelper.logDebug("frame unreadable, kept (server alive): \(window.ownerName) '\(window.title)' wid=\(windowID)")
+        return false
     }
 
     /// Every top-level cell in a layout, paired with its window if it holds one.
