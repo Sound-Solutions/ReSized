@@ -88,8 +88,14 @@ extension WindowManager {
             guard let bounds = windowServerBounds(of: session.windowID) else { return }
             let originDX = bounds.origin.x - session.startBounds.origin.x
             let originDY = bounds.origin.y - session.startBounds.origin.y
+            // A resize dragged from the left/top edge moves the origin in
+            // lockstep with the cursor too — the size check is what tells a
+            // drag apart from that.
             guard hypot(originDX, originDY) > 10,
-                  abs(originDX - cursorDX) < 24, abs(originDY - cursorDY) < 24 else { return }
+                  abs(originDX - cursorDX) < 24, abs(originDY - cursorDY) < 24,
+                  abs(bounds.size.width - session.startBounds.size.width) < 8,
+                  abs(bounds.size.height - session.startBounds.size.height) < 8
+            else { return }
             session.confirmedWindowDrag = true
         }
 
@@ -153,6 +159,10 @@ extension WindowManager {
         destination: DesktopDropDestination,
         in targetLayout: MonitorLayout
     ) {
+        // The tap that started this drag can outlive the layout it targets —
+        // another monitor's layout can keep the tap alive after this one was
+        // stopped mid-drag. A stopped layout must not be mutated.
+        guard targetLayout.isActive else { return }
         AccessibilityHelper.logDebug("modifier-drag: drop wid=\(session.windowID) dest=\(destination)")
 
         // Same layout, seam destination: place(.placed) handles vacate +
@@ -196,7 +206,15 @@ extension WindowManager {
                 applyLayoutAndUpdateExpected(for: source.layout)
             }
         } else {
-            window = WindowDiscovery.discoverAllWindows().first { $0.windowID == session.windowID }
+            // locateManaged only searches active layouts, so a window parked
+            // in a configured-but-inactive layout reads as "unmanaged" here
+            // too. Rediscovering and inserting it would leave it sitting in
+            // both layouts' models at once — the inactive one would fight
+            // this drop for the same window the moment it starts. Refuse
+            // instead of guessing which layout should keep it.
+            let discovered = WindowDiscovery.discoverAllWindows().first { $0.windowID == session.windowID }
+            guard let discovered, !placedWindowIds().contains(discovered.id) else { return }
+            window = discovered
         }
         guard let window else { return }
 

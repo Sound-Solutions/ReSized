@@ -1367,7 +1367,7 @@ class WindowManager {
     /// Only the layout's active mode is counted. Each MonitorLayout keeps both a
     /// columns and a rows array and just one of them is live, so counting both
     /// would reserve windows left behind in whichever mode isn't in use.
-    private func placedWindowIds(excludingMonitor excludedId: String? = nil) -> Set<UUID> {
+    func placedWindowIds(excludingMonitor excludedId: String? = nil) -> Set<UUID> {
         var ids = Set<UUID>()
         for (monitorId, layout) in monitorLayouts where monitorId != excludedId {
             switch layout.layoutMode {
