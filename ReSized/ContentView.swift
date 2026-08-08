@@ -1179,7 +1179,8 @@ struct NestedContainerPreview: View {
                     rowIndex: rowIndex,
                     windowIndex: windowIndex,
                     isHorizontal: container.direction == .horizontal,
-                    isInColumn: isInColumn
+                    isInColumn: isInColumn,
+                    containerSize: container.direction == .horizontal ? size.width : size.height
                 )
             }
         }
@@ -1271,15 +1272,19 @@ struct NestedDividerHandle: View {
     let windowIndex: Int
     let isHorizontal: Bool  // true = horizontal layout (vertical divider)
     let isInColumn: Bool
+    /// On-screen size of the split this divider sits in, along the drag axis.
+    let containerSize: CGFloat
     @EnvironmentObject var windowManager: WindowManager
     @State private var isDragging = false
     @State private var initialProp1: CGFloat = 0
     @State private var initialProp2: CGFloat = 0
+    @State private var dragOffset: CGFloat = 0
 
     var body: some View {
         Rectangle()
             .fill(isDragging ? Color.accentColor : Color(nsColor: .separatorColor))
             .frame(width: isHorizontal ? 6 : nil, height: isHorizontal ? nil : 6)
+            .offset(x: isHorizontal ? dragOffset : 0, y: isHorizontal ? 0 : dragOffset)
             .contentShape(Rectangle())
             .gesture(
                 // .global for the same reason as the primary dividers: the handle
@@ -1290,7 +1295,6 @@ struct NestedDividerHandle: View {
                         if !isDragging {
                             // Store initial proportions at drag start
                             isDragging = true
-                            windowManager.beginInteractiveResize()
                             if isInColumn, let colIndex = columnIndex {
                                 if let container = windowManager.columns[colIndex].windows[windowIndex].nestedContainer {
                                     initialProp1 = container.children[dividerIndex].proportion
@@ -1303,7 +1307,22 @@ struct NestedDividerHandle: View {
                                 }
                             }
                         }
+                        guard containerSize > 0 else { return }
                         let delta = isHorizontal ? value.translation.width : value.translation.height
+                        let shift = WindowManager.achievableShift(
+                            first: initialProp1,
+                            second: initialProp2,
+                            requested: delta / containerSize
+                        )
+                        dragOffset = shift * containerSize
+                    }
+                    .onEnded { value in
+                        isDragging = false
+                        dragOffset = 0
+                        guard containerSize > 0 else { return }
+                        let delta = isHorizontal ? value.translation.width : value.translation.height
+                        let translation = delta / containerSize
+
                         if isInColumn, let colIndex = columnIndex {
                             windowManager.resizeNestedColumnDividerFromInitial(
                                 columnIndex: colIndex,
@@ -1311,8 +1330,7 @@ struct NestedDividerHandle: View {
                                 dividerIndex: dividerIndex,
                                 initialProp1: initialProp1,
                                 initialProp2: initialProp2,
-                                delta: delta,
-                                containerSize: 200 // We'll use proportion-based calculation
+                                proportionalTranslation: translation
                             )
                         } else if let rIndex = rowIndex {
                             windowManager.resizeNestedRowDividerFromInitial(
@@ -1321,14 +1339,9 @@ struct NestedDividerHandle: View {
                                 dividerIndex: dividerIndex,
                                 initialProp1: initialProp1,
                                 initialProp2: initialProp2,
-                                delta: delta,
-                                containerSize: 200
+                                proportionalTranslation: translation
                             )
                         }
-                    }
-                    .onEnded { _ in
-                        isDragging = false
-                        windowManager.endInteractiveResize()
                     }
             )
             .onHover { hovering in
@@ -2369,11 +2382,13 @@ struct ActiveNestedDivider: View {
     @State private var isDragging = false
     @State private var initialProp1: CGFloat = 0
     @State private var initialProp2: CGFloat = 0
+    @State private var dragOffset: CGFloat = 0
 
     var body: some View {
         Rectangle()
             .fill(isDragging ? Color.accentColor : Color(nsColor: .separatorColor))
             .frame(width: isHorizontal ? 4 : nil, height: isHorizontal ? nil : 4)
+            .offset(x: isHorizontal ? dragOffset : 0, y: isHorizontal ? 0 : dragOffset)
             .contentShape(Rectangle())
             .gesture(
                 // .global for the same reason as the primary dividers: the handle
@@ -2384,7 +2399,6 @@ struct ActiveNestedDivider: View {
                         if !isDragging {
                             // Store initial proportions at drag start
                             isDragging = true
-                            windowManager.beginInteractiveResize()
                             if isColumn, let colIndex = columnIndex {
                                 if let container = windowManager.columns[colIndex].windows[windowIndex].nestedContainer {
                                     initialProp1 = container.children[dividerIndex].proportion
@@ -2397,7 +2411,22 @@ struct ActiveNestedDivider: View {
                                 }
                             }
                         }
+                        guard containerSize > 0 else { return }
                         let delta = isHorizontal ? value.translation.width : value.translation.height
+                        let shift = WindowManager.achievableShift(
+                            first: initialProp1,
+                            second: initialProp2,
+                            requested: delta / containerSize
+                        )
+                        dragOffset = shift * containerSize
+                    }
+                    .onEnded { value in
+                        isDragging = false
+                        dragOffset = 0
+                        guard containerSize > 0 else { return }
+                        let delta = isHorizontal ? value.translation.width : value.translation.height
+                        let translation = delta / containerSize
+
                         if isColumn, let colIndex = columnIndex {
                             windowManager.resizeNestedColumnDividerFromInitial(
                                 columnIndex: colIndex,
@@ -2405,8 +2434,7 @@ struct ActiveNestedDivider: View {
                                 dividerIndex: dividerIndex,
                                 initialProp1: initialProp1,
                                 initialProp2: initialProp2,
-                                delta: delta,
-                                containerSize: containerSize
+                                proportionalTranslation: translation
                             )
                         } else if let rIndex = rowIndex {
                             windowManager.resizeNestedRowDividerFromInitial(
@@ -2415,14 +2443,9 @@ struct ActiveNestedDivider: View {
                                 dividerIndex: dividerIndex,
                                 initialProp1: initialProp1,
                                 initialProp2: initialProp2,
-                                delta: delta,
-                                containerSize: containerSize
+                                proportionalTranslation: translation
                             )
                         }
-                    }
-                    .onEnded { _ in
-                        isDragging = false
-                        windowManager.endInteractiveResize()
                     }
             )
             .onHover { hovering in

@@ -248,6 +248,41 @@ struct LayoutContainer: Identifiable, Equatable {
             }
         }
     }
+
+    /// Drop windows that `isDead` reports as gone, recursing into child
+    /// containers and collapsing any that empty out. Returns true if anything
+    /// was removed, so the caller knows whether to rebuild the cell.
+    ///
+    /// Closed-window detection only ever walked top-level cells, so a window
+    /// closed inside a split stayed in the layout indefinitely.
+    mutating func pruneDeadWindows(isDead: (ExternalWindow) -> Bool) -> Bool {
+        var removedAny = false
+        var surviving: [LayoutNode] = []
+
+        for child in children {
+            switch child {
+            case .window(let node):
+                if isDead(node.window) {
+                    removedAny = true
+                } else {
+                    surviving.append(child)
+                }
+            case .container(var nested):
+                if nested.pruneDeadWindows(isDead: isDead) {
+                    removedAny = true
+                }
+                // An emptied-out child container is just noise; drop it.
+                if !nested.children.isEmpty {
+                    surviving.append(.container(nested))
+                }
+            }
+        }
+
+        guard removedAny else { return false }
+        children = surviving
+        normalizeProportions()
+        return true
+    }
 }
 
 /// A node in the layout tree - either a window or a nested container
@@ -406,15 +441,6 @@ class WindowManager: ObservableObject {
     /// Bumped whenever the layout's structure changes, so derived caches can tell
     /// they're stale without re-deriving a signature on every single read.
     private var layoutRevision: Int = 0
-
-    /// True while a divider is being dragged.
-    ///
-    /// While dragging we update the model only: the SwiftUI preview follows the
-    /// cursor smoothly and no real window is touched. Commanding N foreign apps
-    /// to resize over synchronous AX at 30Hz can never look smooth — each app
-    /// relayouts on its own schedule, some snap to size increments, and you see
-    /// every intermediate state. So real windows move exactly once, on release.
-    private var isInteracting = false
 
     /// One low-frequency timer shared by every active layout — see
     /// startMaintenanceTimerIfNeeded() for why this is not a display link.
@@ -1530,25 +1556,13 @@ class WindowManager: ObservableObject {
         return (clamped, total - clamped)
     }
 
-    /// Begin an interactive divider drag. Real windows stop being touched until
-    /// endInteractiveResize().
-    func beginInteractiveResize() {
-        isInteracting = true
-    }
-
-    /// Finish an interactive drag and commit the result to the real windows in a
-    /// single authoritative apply.
-    func endInteractiveResize() {
-        guard isInteracting else { return }
-        isInteracting = false
+    /// Push the model to the real windows, if any are being managed.
+    ///
+    /// Every divider now commits on mouse-up rather than during the drag, so
+    /// there is no longer an "interactive" state to suppress: by the time any of
+    /// these callers run, the gesture is already over.
+    private func applyLayoutIfActive() {
         guard isActive else { return }
-        applyLayout()
-    }
-
-    /// Push the model to real windows, unless a drag is in flight — in which case
-    /// the commit happens on release instead.
-    private func applyLayoutUnlessInteracting() {
-        guard isActive, !isInteracting else { return }
         applyLayout()
     }
 
@@ -1580,7 +1594,7 @@ class WindowManager: ObservableObject {
         columns = updated
 
         normalizeColumnProportions()
-        applyLayoutUnlessInteracting()
+        applyLayoutIfActive()
     }
 
     /// Resize a row divider within a column (between windowIndex and windowIndex+1)
@@ -1607,7 +1621,7 @@ class WindowManager: ObservableObject {
         columns = updated
 
         normalizeWindowProportions(inColumn: columnIndex)
-        applyLayoutUnlessInteracting()
+        applyLayoutIfActive()
     }
 
     // MARK: - Row Mode Resizing
@@ -1633,7 +1647,7 @@ class WindowManager: ObservableObject {
         rows = updated
 
         normalizeRowProportions()
-        applyLayoutUnlessInteracting()
+        applyLayoutIfActive()
     }
 
     /// Resize a window divider within a row (between windowIndex and windowIndex+1)
@@ -1660,7 +1674,7 @@ class WindowManager: ObservableObject {
         rows = updated
 
         normalizeWindowProportions(inRow: rowIndex)
-        applyLayoutUnlessInteracting()
+        applyLayoutIfActive()
     }
 
     // MARK: - Layout Application
@@ -1981,30 +1995,30 @@ class WindowManager: ObservableObject {
         }
     }
 
-    /// Resize divider within a nested container in a column (using initial proportions)
-    func resizeNestedColumnDividerFromInitial(columnIndex: Int, windowIndex: Int, dividerIndex: Int, initialProp1: CGFloat, initialProp2: CGFloat, delta: CGFloat, containerSize: CGFloat) {
+    /// Resize a divider inside a nested container in a column.
+    ///
+    /// `proportionalTranslation` is the total drag since the gesture began, as a
+    /// fraction of the container's on-screen size. This used to take raw pixels
+    /// against a hardcoded containerSize of 200 and then scale by an arbitrary
+    /// 0.5, so sensitivity had no relationship to how big the split actually was.
+    func resizeNestedColumnDividerFromInitial(
+        columnIndex: Int,
+        windowIndex: Int,
+        dividerIndex: Int,
+        initialProp1: CGFloat,
+        initialProp2: CGFloat,
+        proportionalTranslation: CGFloat
+    ) {
         guard columnIndex < columns.count else { return }
         guard windowIndex < columns[columnIndex].windows.count else { return }
         guard var container = columns[columnIndex].windows[windowIndex].nestedContainer else { return }
-        guard dividerIndex < container.children.count - 1 else { return }
+        guard dividerIndex >= 0, dividerIndex + 1 < container.children.count else { return }
 
-        // Calculate proportional delta (scale factor for sensitivity)
-        let totalProportion = initialProp1 + initialProp2
-        let deltaProportion = (delta / containerSize) * totalProportion * 0.5
-        let minProportion: CGFloat = 0.1
-
-        var prop1 = initialProp1 + deltaProportion
-        var prop2 = initialProp2 - deltaProportion
-
-        // Clamp proportions
-        if prop1 < minProportion {
-            prop2 = totalProportion - minProportion
-            prop1 = minProportion
-        }
-        if prop2 < minProportion {
-            prop1 = totalProportion - minProportion
-            prop2 = minProportion
-        }
+        guard let (prop1, prop2) = Self.resolveSplit(
+            first: initialProp1,
+            second: initialProp2,
+            delta: proportionalTranslation
+        ) else { return }
 
         container.children[dividerIndex].proportion = prop1
         container.children[dividerIndex + 1].proportion = prop2
@@ -2019,33 +2033,29 @@ class WindowManager: ObservableObject {
         newColumns[columnIndex] = newColumn
         columns = newColumns
 
-        applyLayoutUnlessInteracting()
+        applyLayoutIfActive()
     }
 
-    /// Resize divider within a nested container in a row (using initial proportions)
-    func resizeNestedRowDividerFromInitial(rowIndex: Int, windowIndex: Int, dividerIndex: Int, initialProp1: CGFloat, initialProp2: CGFloat, delta: CGFloat, containerSize: CGFloat) {
+    /// Resize a divider inside a nested container in a row. See the column
+    /// variant above for why this takes a proportion rather than pixels.
+    func resizeNestedRowDividerFromInitial(
+        rowIndex: Int,
+        windowIndex: Int,
+        dividerIndex: Int,
+        initialProp1: CGFloat,
+        initialProp2: CGFloat,
+        proportionalTranslation: CGFloat
+    ) {
         guard rowIndex < rows.count else { return }
         guard windowIndex < rows[rowIndex].windows.count else { return }
         guard var container = rows[rowIndex].windows[windowIndex].nestedContainer else { return }
-        guard dividerIndex < container.children.count - 1 else { return }
+        guard dividerIndex >= 0, dividerIndex + 1 < container.children.count else { return }
 
-        // Calculate proportional delta (scale factor for sensitivity)
-        let totalProportion = initialProp1 + initialProp2
-        let deltaProportion = (delta / containerSize) * totalProportion * 0.5
-        let minProportion: CGFloat = 0.1
-
-        var prop1 = initialProp1 + deltaProportion
-        var prop2 = initialProp2 - deltaProportion
-
-        // Clamp proportions
-        if prop1 < minProportion {
-            prop2 = totalProportion - minProportion
-            prop1 = minProportion
-        }
-        if prop2 < minProportion {
-            prop1 = totalProportion - minProportion
-            prop2 = minProportion
-        }
+        guard let (prop1, prop2) = Self.resolveSplit(
+            first: initialProp1,
+            second: initialProp2,
+            delta: proportionalTranslation
+        ) else { return }
 
         container.children[dividerIndex].proportion = prop1
         container.children[dividerIndex + 1].proportion = prop2
@@ -2060,7 +2070,7 @@ class WindowManager: ObservableObject {
         newRows[rowIndex] = newRow
         rows = newRows
 
-        applyLayoutUnlessInteracting()
+        applyLayoutIfActive()
     }
 
     // MARK: - Active Management
@@ -2505,20 +2515,25 @@ class WindowManager: ObservableObject {
         // the indices the remaining iterations are about to use, so two windows
         // disappearing at once could delete the wrong column entirely.
         var closedCellIds: [UUID] = []
+        var prunedNested = false
 
         for cell in managedCells(in: layout) {
-            guard let window = cell.window else { continue }
-            // Only treat as closed when the frame is unreadable AND the owning
-            // process is gone — AX calls also time out during system sleep, and
-            // dropping windows then is what used to empty layouts overnight.
-            if ExternalWindow.getFrame(from: window.axElement) == nil,
-               kill(window.ownerPID, 0) != 0 {
-                closedCellIds.append(cell.id)
+            if let window = cell.window {
+                if isWindowGone(window) {
+                    closedCellIds.append(cell.id)
+                }
+            } else if cell.hasNestedContainer {
+                // Splits are pruned in place; the cell only dies if it empties.
+                if pruneNestedCell(cell.id, in: layout) {
+                    prunedNested = true
+                    if nestedCellIsEmpty(cell.id, in: layout) {
+                        closedCellIds.append(cell.id)
+                    }
+                }
             }
-            // TODO: Check nested container windows
         }
 
-        guard !closedCellIds.isEmpty else { return }
+        guard !closedCellIds.isEmpty || prunedNested else { return }
 
         for cellId in closedCellIds {
             removeClosedCell(cellId, in: layout)
@@ -2527,14 +2542,89 @@ class WindowManager: ObservableObject {
         objectWillChange.send()
     }
 
+    /// A window counts as gone only when its frame is unreadable AND the owning
+    /// process is dead — AX calls also time out during system sleep, and dropping
+    /// windows then is what used to empty layouts overnight.
+    private func isWindowGone(_ window: ExternalWindow) -> Bool {
+        ExternalWindow.getFrame(from: window.axElement) == nil && kill(window.ownerPID, 0) != 0
+    }
+
     /// Every top-level cell in a layout, paired with its window if it holds one.
-    private func managedCells(in layout: MonitorLayout) -> [(id: UUID, window: ExternalWindow?)] {
+    private func managedCells(
+        in layout: MonitorLayout
+    ) -> [(id: UUID, window: ExternalWindow?, hasNestedContainer: Bool)] {
         switch layout.layoutMode {
         case .columns:
-            return layout.columns.flatMap { $0.windows.map { (id: $0.id, window: $0.window) } }
+            return layout.columns.flatMap { column in
+                column.windows.map { (id: $0.id, window: $0.window, hasNestedContainer: $0.isNested) }
+            }
         case .rows:
-            return layout.rows.flatMap { $0.windows.map { (id: $0.id, window: $0.window) } }
+            return layout.rows.flatMap { row in
+                row.windows.map { (id: $0.id, window: $0.window, hasNestedContainer: $0.isNested) }
+            }
         }
+    }
+
+    /// Prune dead windows from the split held by `cellId`, collapsing the cell
+    /// back to a plain window when exactly one survives. Returns true if the
+    /// split changed at all.
+    private func pruneNestedCell(_ cellId: UUID, in layout: MonitorLayout) -> Bool {
+        switch layout.layoutMode {
+        case .columns:
+            guard let col = layout.columns.firstIndex(where: { column in
+                column.windows.contains { $0.id == cellId }
+            }),
+            let idx = layout.columns[col].windows.firstIndex(where: { $0.id == cellId }),
+            var container = layout.columns[col].windows[idx].nestedContainer else { return false }
+
+            guard container.pruneDeadWindows(isDead: isWindowGone) else { return false }
+
+            let cell = layout.columns[col].windows[idx]
+            if container.children.count == 1, case .window(let node) = container.children[0] {
+                layout.columns[col].windows[idx] = ColumnWindow(
+                    id: cell.id, window: node.window, heightProportion: cell.heightProportion
+                )
+            } else {
+                layout.columns[col].windows[idx].nestedContainer = container
+            }
+            return true
+
+        case .rows:
+            guard let row = layout.rows.firstIndex(where: { row in
+                row.windows.contains { $0.id == cellId }
+            }),
+            let idx = layout.rows[row].windows.firstIndex(where: { $0.id == cellId }),
+            var container = layout.rows[row].windows[idx].nestedContainer else { return false }
+
+            guard container.pruneDeadWindows(isDead: isWindowGone) else { return false }
+
+            let cell = layout.rows[row].windows[idx]
+            if container.children.count == 1, case .window(let node) = container.children[0] {
+                layout.rows[row].windows[idx] = RowWindow(
+                    id: cell.id, window: node.window, widthProportion: cell.widthProportion
+                )
+            } else {
+                layout.rows[row].windows[idx].nestedContainer = container
+            }
+            return true
+        }
+    }
+
+    /// Whether a cell now holds neither a window nor any surviving split child.
+    private func nestedCellIsEmpty(_ cellId: UUID, in layout: MonitorLayout) -> Bool {
+        let cell: (window: ExternalWindow?, container: LayoutContainer?)?
+        switch layout.layoutMode {
+        case .columns:
+            cell = layout.columns.flatMap(\.windows)
+                .first { $0.id == cellId }
+                .map { ($0.window, $0.nestedContainer) }
+        case .rows:
+            cell = layout.rows.flatMap(\.windows)
+                .first { $0.id == cellId }
+                .map { ($0.window, $0.nestedContainer) }
+        }
+        guard let cell else { return true }
+        return cell.window == nil && (cell.container?.children.isEmpty ?? true)
     }
 
     /// Remove a cell from whichever column/row currently holds it, collapsing the
@@ -2949,18 +3039,11 @@ class WindowManager: ObservableObject {
             columns: layout.layoutMode == .columns ? layout.columns.map { col in
                 SavedColumn(
                     widthProportion: col.widthProportion,
-                    windows: col.windows.compactMap { colWin -> SavedWindowSlot? in
-                        guard let window = colWin.window else {
-                            // TODO: Handle nested containers in saved layouts
-                            return nil
-                        }
-                        return SavedWindowSlot(
-                            ownerName: window.ownerName,
-                            windowTitle: window.title,
-                            bundleIdentifier: AppLauncher.getBundleIdentifier(for: window.ownerName),
-                            proportion: colWin.heightProportion,
-                            isPlaceholder: false,
-                            frame: window.frame  // Store frame for better matching
+                    windows: col.windows.compactMap { colWin in
+                        savedSlot(
+                            window: colWin.window,
+                            nestedContainer: colWin.nestedContainer,
+                            proportion: colWin.heightProportion
                         )
                     }
                 )
@@ -2968,23 +3051,66 @@ class WindowManager: ObservableObject {
             rows: layout.layoutMode == .rows ? layout.rows.map { row in
                 SavedRow(
                     heightProportion: row.heightProportion,
-                    windows: row.windows.compactMap { rowWin -> SavedWindowSlot? in
-                        guard let window = rowWin.window else {
-                            // TODO: Handle nested containers in saved layouts
-                            return nil
-                        }
-                        return SavedWindowSlot(
-                            ownerName: window.ownerName,
-                            windowTitle: window.title,
-                            bundleIdentifier: AppLauncher.getBundleIdentifier(for: window.ownerName),
-                            proportion: rowWin.widthProportion,
-                            isPlaceholder: false,
-                            frame: window.frame  // Store frame for better matching
+                    windows: row.windows.compactMap { rowWin in
+                        savedSlot(
+                            window: rowWin.window,
+                            nestedContainer: rowWin.nestedContainer,
+                            proportion: rowWin.widthProportion
                         )
                     }
                 )
             } : nil,
             presetSlot: presetSlot
+        )
+    }
+
+    /// Encode one cell — either a window or a whole split — into a saved slot.
+    private func savedSlot(
+        window: ExternalWindow?,
+        nestedContainer: LayoutContainer?,
+        proportion: CGFloat
+    ) -> SavedWindowSlot? {
+        if let window {
+            return savedSlot(for: window, proportion: proportion)
+        }
+        if let nestedContainer {
+            return SavedWindowSlot(
+                ownerName: "",
+                windowTitle: nil,
+                proportion: proportion,
+                nested: savedContainer(from: nestedContainer)
+            )
+        }
+        return nil
+    }
+
+    private func savedSlot(for window: ExternalWindow, proportion: CGFloat) -> SavedWindowSlot {
+        SavedWindowSlot(
+            ownerName: window.ownerName,
+            windowTitle: window.title,
+            bundleIdentifier: AppLauncher.getBundleIdentifier(for: window.ownerName),
+            proportion: proportion,
+            isPlaceholder: false,
+            frame: window.frame  // Store frame for better matching
+        )
+    }
+
+    private func savedContainer(from container: LayoutContainer) -> SavedNestedContainer {
+        SavedNestedContainer(
+            direction: container.direction.rawValue,
+            children: container.children.map { child in
+                switch child {
+                case .window(let node):
+                    return savedSlot(for: node.window, proportion: node.proportion)
+                case .container(let nested):
+                    return SavedWindowSlot(
+                        ownerName: "",
+                        windowTitle: nil,
+                        proportion: nested.proportion,
+                        nested: savedContainer(from: nested)
+                    )
+                }
+            }
         )
     }
 
@@ -3149,6 +3275,16 @@ class WindowManager: ObservableObject {
 
             layout.columns = savedColumns.map { savedCol in
                 let matchedWindows = savedCol.windows.compactMap { slot -> ColumnWindow? in
+                    if let saved = slot.nested {
+                        guard let container = restoreContainer(from: saved, excluding: &usedWindowIds) else {
+                            return nil
+                        }
+                        return ColumnWindow(
+                            id: UUID(),
+                            nestedContainer: container,
+                            heightProportion: slot.proportion
+                        )
+                    }
                     guard let match = findMatchingWindow(for: slot, excluding: usedWindowIds) else {
                         return nil
                     }
@@ -3171,6 +3307,16 @@ class WindowManager: ObservableObject {
 
             layout.rows = savedRows.map { savedRow in
                 let matchedWindows = savedRow.windows.compactMap { slot -> RowWindow? in
+                    if let saved = slot.nested {
+                        guard let container = restoreContainer(from: saved, excluding: &usedWindowIds) else {
+                            return nil
+                        }
+                        return RowWindow(
+                            id: UUID(),
+                            nestedContainer: container,
+                            widthProportion: slot.proportion
+                        )
+                    }
                     guard let match = findMatchingWindow(for: slot, excluding: usedWindowIds) else {
                         return nil
                     }
@@ -3190,6 +3336,36 @@ class WindowManager: ObservableObject {
 
         layout.appState = .configuring
         objectWillChange.send()
+    }
+
+    /// Rebuild a split from its saved form, matching each leaf back to a live
+    /// window. Returns nil if nothing in the split could be matched — a split
+    /// with no windows left in it is not worth restoring as an empty box.
+    private func restoreContainer(
+        from saved: SavedNestedContainer,
+        excluding usedIds: inout Set<UUID>
+    ) -> LayoutContainer? {
+        let direction = SplitDirection(rawValue: saved.direction) ?? .horizontal
+        var children: [LayoutNode] = []
+
+        for slot in saved.children {
+            if let nestedSaved = slot.nested {
+                if let nested = restoreContainer(from: nestedSaved, excluding: &usedIds) {
+                    var sized = nested
+                    sized.proportion = slot.proportion
+                    children.append(.container(sized))
+                }
+            } else if let match = findMatchingWindow(for: slot, excluding: usedIds) {
+                usedIds.insert(match.id)
+                children.append(.window(LayoutWindowNode(window: match, proportion: slot.proportion)))
+            }
+        }
+
+        guard !children.isEmpty else { return nil }
+
+        var container = LayoutContainer(direction: direction, children: children)
+        container.normalizeProportions()
+        return container
     }
 
     /// List all saved layouts
@@ -3322,12 +3498,26 @@ struct SavedRow: Codable {
     let windows: [SavedWindowSlot]
 }
 
+/// A saved nested split. Children are SavedWindowSlots, which may themselves be
+/// nested, so the structure recurses the same way LayoutNode does.
+struct SavedNestedContainer: Codable {
+    let direction: String           // SplitDirection.rawValue
+    let children: [SavedWindowSlot]
+}
+
 struct SavedWindowSlot: Codable {
     let ownerName: String
     let windowTitle: String?
     let bundleIdentifier: String?   // For launching apps
     let proportion: CGFloat
     let isPlaceholder: Bool         // true = app wasn't open when saved
+
+    /// Non-nil when this slot holds a split rather than a single window.
+    ///
+    /// Splits used to be dropped on the floor when saving: the encoder
+    /// compactMapped nested cells to nil, so saving a preset silently destroyed
+    /// them and reloading gave you a layout with a pane missing.
+    let nested: SavedNestedContainer?
 
     // Frame position for matching windows with same app name (e.g., multiple Terminal windows)
     let frameX: CGFloat?
@@ -3344,12 +3534,14 @@ struct SavedWindowSlot: Codable {
 
     // Backwards compatibility
     init(ownerName: String, windowTitle: String?, bundleIdentifier: String? = nil,
-         proportion: CGFloat, isPlaceholder: Bool = false, frame: CGRect? = nil) {
+         proportion: CGFloat, isPlaceholder: Bool = false, frame: CGRect? = nil,
+         nested: SavedNestedContainer? = nil) {
         self.ownerName = ownerName
         self.windowTitle = windowTitle
         self.bundleIdentifier = bundleIdentifier
         self.proportion = proportion
         self.isPlaceholder = isPlaceholder
+        self.nested = nested
         self.frameX = frame?.origin.x
         self.frameY = frame?.origin.y
         self.frameWidth = frame?.width
@@ -3363,6 +3555,8 @@ struct SavedWindowSlot: Codable {
         bundleIdentifier = try container.decodeIfPresent(String.self, forKey: .bundleIdentifier)
         proportion = try container.decode(CGFloat.self, forKey: .proportion)
         isPlaceholder = try container.decodeIfPresent(Bool.self, forKey: .isPlaceholder) ?? false
+        // nil for saves written before splits were persisted
+        nested = try container.decodeIfPresent(SavedNestedContainer.self, forKey: .nested)
         // Frame fields - nil for old saves that don't have them
         frameX = try container.decodeIfPresent(CGFloat.self, forKey: .frameX)
         frameY = try container.decodeIfPresent(CGFloat.self, forKey: .frameY)
