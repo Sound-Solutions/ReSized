@@ -89,14 +89,11 @@ struct ColumnWindow: Identifiable, Equatable {
         self.heightProportion = heightProportion
     }
 
-    static func == (lhs: ColumnWindow, rhs: ColumnWindow) -> Bool {
-        lhs.id == rhs.id &&
-        lhs.window?.id == rhs.window?.id &&
-        lhs.nestedContainer?.id == rhs.nestedContainer?.id &&
-        lhs.nestedContainer?.children.count == rhs.nestedContainer?.children.count &&
-        lhs.nestedContainer?.children.first?.proportion == rhs.nestedContainer?.children.first?.proportion &&
-        lhs.heightProportion == rhs.heightProportion
-    }
+    // Equality is synthesized. It used to be hand-written and compared only the
+    // ids plus the split's child *count* and *first* child's proportion — so
+    // resizing the second pane, or swapping two panes, compared equal. SwiftUI
+    // skips redrawing a subtree whose inputs compare equal, and views take a
+    // Column by value, so those edits reached the model and never the screen.
 }
 
 /// A column containing vertically stacked windows
@@ -113,9 +110,8 @@ struct Column: Identifiable, Equatable {
         self.windows = windows
     }
 
-    static func == (lhs: Column, rhs: Column) -> Bool {
-        lhs.id == rhs.id
-    }
+    // Synthesized. Comparing ids alone claimed a column was unchanged whenever
+    // its contents changed, which is exactly what a split does to a column.
 }
 
 // MARK: - Row-Based Layout (alternative to columns)
@@ -162,14 +158,7 @@ struct RowWindow: Identifiable, Equatable {
         self.widthProportion = widthProportion
     }
 
-    static func == (lhs: RowWindow, rhs: RowWindow) -> Bool {
-        lhs.id == rhs.id &&
-        lhs.window?.id == rhs.window?.id &&
-        lhs.nestedContainer?.id == rhs.nestedContainer?.id &&
-        lhs.nestedContainer?.children.count == rhs.nestedContainer?.children.count &&
-        lhs.nestedContainer?.children.first?.proportion == rhs.nestedContainer?.children.first?.proportion &&
-        lhs.widthProportion == rhs.widthProportion
-    }
+    // Synthesized — see ColumnWindow for what the hand-written version missed.
 }
 
 /// A row containing horizontally arranged windows
@@ -186,9 +175,7 @@ struct Row: Identifiable, Equatable {
         self.windows = windows
     }
 
-    static func == (lhs: Row, rhs: Row) -> Bool {
-        lhs.id == rhs.id
-    }
+    // Synthesized — see Column.
 }
 
 // MARK: - Nested Container Support
