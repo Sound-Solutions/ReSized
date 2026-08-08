@@ -79,8 +79,13 @@ final class SeamOverlayView: NSView {
     /// goes to whatever is underneath — without this the overlay would swallow
     /// every click on the desktop it covers.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        let local = convert(point, from: superview)
-        return seamRect(at: local) == nil ? nil : self
+        // Routed through window coordinates so this lands in exactly the same
+        // space as the mouse handlers. hitTest is handed a point in the
+        // superview's system and the handlers convert from the window's, and
+        // any difference between the two shows up as the seam being grabbable
+        // slightly off from where it is drawn.
+        let windowPoint = superview?.convert(point, to: nil) ?? point
+        return seamRect(at: convert(windowPoint, from: nil)) == nil ? nil : self
     }
 
     private func seamRect(at point: CGPoint) -> Int? {
@@ -107,28 +112,36 @@ final class SeamOverlayView: NSView {
 
         // Invisible until pointed at. A permanent grid of lines over every
         // window would be noise; the cursor already says the seam is there.
-        guard let rect = indicatorRect() else { return }
-        NSColor.controlAccentColor.withAlphaComponent(0.85).setFill()
-        NSBezierPath(roundedRect: rect, xRadius: 1.5, yRadius: 1.5).fill()
+        guard let (band, isVertical) = indicator() else { return }
+
+        // The band is the grabbable strip itself, drawn faintly, with a crisp
+        // line down its middle. Showing only the thin line meant what you could
+        // see and what you could grab were different shapes, so being on the
+        // line was no guarantee of being on the seam.
+        NSColor.controlAccentColor.withAlphaComponent(0.22).setFill()
+        NSBezierPath(roundedRect: band, xRadius: 2, yRadius: 2).fill()
+
+        let centre: CGRect = isVertical
+            ? band.insetBy(dx: band.width / 2 - 1.5, dy: 0)
+            : band.insetBy(dx: 0, dy: band.height / 2 - 1.5)
+        NSColor.controlAccentColor.withAlphaComponent(0.95).setFill()
+        NSBezierPath(roundedRect: centre, xRadius: 1.5, yRadius: 1.5).fill()
     }
 
-    /// The line to draw: pinned to the pointer while dragging, otherwise
-    /// sitting on the hovered seam.
-    private func indicatorRect() -> CGRect? {
-        let thickness: CGFloat = 3
-
+    /// What to draw: pinned to the pointer while dragging, otherwise the
+    /// hovered seam's own strip.
+    private func indicator() -> (band: CGRect, isVertical: Bool)? {
         if let activeSeam, let dragPoint {
             let extent = activeSeam.rect.offsetBy(dx: -screenOrigin.x, dy: -screenOrigin.y)
-            return activeSeam.isVertical
+            let thickness = activeSeam.isVertical ? extent.width : extent.height
+            let band = activeSeam.isVertical
                 ? CGRect(x: dragPoint.x - thickness / 2, y: extent.minY, width: thickness, height: extent.height)
                 : CGRect(x: extent.minX, y: dragPoint.y - thickness / 2, width: extent.width, height: thickness)
+            return (band, activeSeam.isVertical)
         }
 
         guard let hoveredIndex, hoveredIndex < seams.count else { return nil }
-        let rect = localSeamRects()[hoveredIndex]
-        return seams[hoveredIndex].isVertical
-            ? rect.insetBy(dx: rect.width / 2 - thickness / 2, dy: 0)
-            : rect.insetBy(dx: 0, dy: rect.height / 2 - thickness / 2)
+        return (localSeamRects()[hoveredIndex], seams[hoveredIndex].isVertical)
     }
 
     // MARK: Mouse

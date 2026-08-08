@@ -2273,8 +2273,10 @@ class WindowManager {
 
     // MARK: - Desktop Seams
 
-    /// How thick a seam is to grab, in points.
-    static let seamGrabThickness: CGFloat = 10
+    /// How thick a seam is to grab, in points. Wide enough to hit without
+    /// aiming, and it is drawn at this width so there is nothing to aim at
+    /// other than what you can see.
+    static let seamGrabThickness: CGFloat = 12
 
     /// Every draggable boundary in a live layout, positioned from where the
     /// windows actually are.
