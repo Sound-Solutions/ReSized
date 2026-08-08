@@ -723,6 +723,10 @@ struct ConfigureLayoutView: View {
                     Text("Rows").tag(LayoutMode.rows)
                 }
                 .pickerStyle(.segmented)
+                // Without this the "Mode" label is laid out inside the 160pt
+                // frame and wraps to "Mo/de". The back button beside it already
+                // says Mode, so the label is redundant anyway.
+                .labelsHidden()
                 .frame(width: 160)
 
                 // Scan toggle button
@@ -2467,6 +2471,7 @@ struct NestedRowContainerPreview: View {
     let rowIndex: Int
     let windowIndex: Int
     @EnvironmentObject var windowManager: WindowManager
+    @State private var isDropTarget = false
 
     var body: some View {
         VStack(spacing: 2) {
@@ -2490,6 +2495,29 @@ struct NestedRowContainerPreview: View {
         .padding(4)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
         .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color.accentColor, lineWidth: 2)
+                .opacity(isDropTarget ? 1 : 0)
+        )
+        // The whole split accepts drops, not just the 30pt dashed strip inside
+        // it — matching the columns variant, which has had this all along.
+        .contentShape(Rectangle())
+        .dropDestination(for: WindowDragData.self) { items, _ in
+            guard let dragData = items.first,
+                  let externalId = dragData.externalWindowId,
+                  let window = windowManager.availableWindows.first(where: { $0.id == externalId })
+            else { return false }
+
+            windowManager.addWindowToRowNested(
+                rowIndex: rowIndex,
+                windowIndex: windowIndex,
+                window: window
+            )
+            return true
+        } isTargeted: { targeted in
+            isDropTarget = targeted
+        }
     }
 }
 
@@ -2549,6 +2577,11 @@ struct NestedRowDropZone: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+            // strokeBorder only hit-tests the stroke itself, so without this the
+            // inside of the dashed box was not a drop target at all and the drop
+            // fell through to the whole-row destination behind it — which added a
+            // new top-level cell instead of putting the window in the split.
+            .contentShape(Rectangle())
             .dropDestination(for: WindowDragData.self) { items, _ in
                 guard let dragData = items.first else { return false }
 
