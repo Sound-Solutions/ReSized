@@ -2546,47 +2546,50 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            // License Section
-            Section("License") {
-                LicenseStatusRow(state: licenseManager.licenseState)
+            // License Section — hidden entirely while licensing is switched off,
+            // rather than showing a "Licensed" row for a licence nobody bought.
+            if LicenseManager.isEnabled {
+                Section("License") {
+                    LicenseStatusRow(state: licenseManager.licenseState)
 
-                if case .licensed = licenseManager.licenseState {
-                    // Already licensed
-                    HStack {
-                        Text("License Key")
-                        Spacer()
-                        Text(maskedKey(licenseManager.licenseKey))
-                            .foregroundStyle(.secondary)
-                            .font(.system(.body, design: .monospaced))
-                    }
-                } else {
-                    // Trial or expired - show key entry
-                    HStack {
-                        TextField("Enter license key", text: $enteredKey)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(.body, design: .monospaced))
+                    if case .licensed = licenseManager.licenseState {
+                        // Already licensed
+                        HStack {
+                            Text("License Key")
+                            Spacer()
+                            Text(maskedKey(licenseManager.licenseKey))
+                                .foregroundStyle(.secondary)
+                                .font(.system(.body, design: .monospaced))
+                        }
+                    } else {
+                        // Trial or expired - show key entry
+                        HStack {
+                            TextField("Enter license key", text: $enteredKey)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.body, design: .monospaced))
 
-                        Button(licenseManager.isValidating ? "Validating..." : "Activate") {
-                            licenseManager.saveLicenseKey(enteredKey)
-                            licenseManager.validateLicense { success, error in
-                                if success {
-                                    enteredKey = ""
+                            Button(licenseManager.isValidating ? "Validating..." : "Activate") {
+                                licenseManager.saveLicenseKey(enteredKey)
+                                licenseManager.validateLicense { success, error in
+                                    if success {
+                                        enteredKey = ""
+                                    }
                                 }
                             }
+                            .disabled(enteredKey.isEmpty || licenseManager.isValidating)
                         }
-                        .disabled(enteredKey.isEmpty || licenseManager.isValidating)
-                    }
 
-                    if let error = licenseManager.validationError {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
+                        if let error = licenseManager.validationError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
 
-                    Button("Buy License") {
-                        licenseManager.openPurchasePage()
+                        Button("Buy License") {
+                            licenseManager.openPurchasePage()
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
-                    .buttonStyle(.borderedProminent)
                 }
             }
 

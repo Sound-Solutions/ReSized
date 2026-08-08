@@ -14,6 +14,15 @@ enum LicenseState {
 class LicenseManager: ObservableObject {
     static let shared = LicenseManager()
 
+    /// Master switch for the whole trial/licensing system.
+    ///
+    /// Currently OFF: the app runs unrestricted — no trial clock, no expiry
+    /// overlay, and Settings hides the License section rather than claiming a
+    /// licence that doesn't exist. While off, no trial start date is written, so
+    /// turning this back on starts the 7 days from that point instead of
+    /// retroactively burning them. Nothing was deleted; flip to true to restore.
+    static let isEnabled = false
+
     private let trialStartKey = "ReSized_TrialStartDate"
     private let licenseKeyKey = "ReSized_LicenseKey"
     private let licenseValidKey = "ReSized_LicenseValid"
@@ -30,6 +39,11 @@ class LicenseManager: ObservableObject {
     @Published var validationError: String?
 
     init() {
+        guard Self.isEnabled else {
+            // Deliberately does not stamp a trial start date — see isEnabled.
+            licenseState = .licensed
+            return
+        }
         initializeTrialIfNeeded()
         loadLicenseKey()
         updateLicenseState()
@@ -79,6 +93,10 @@ class LicenseManager: ObservableObject {
     // MARK: - License State
 
     func updateLicenseState() {
+        guard Self.isEnabled else {
+            licenseState = .licensed
+            return
+        }
         if isLicensed {
             licenseState = .licensed
         } else if isTrialExpired {
