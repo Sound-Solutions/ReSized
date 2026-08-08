@@ -2616,6 +2616,20 @@ class WindowManager {
               )
         else { return }
 
+        // A window dragged by its title bar keeps its size and changes only its
+        // position. There is no way to refuse that — nothing can stop another
+        // app's window being dragged — so put it straight back instead, before
+        // it is left sitting on top of its neighbours.
+        //
+        // This has to be handled on its own. Moving shifts both edges by the
+        // same amount, so the resize handlers see no change in width or height,
+        // adjust nothing, and leave the window wherever it was dropped.
+        if isMove(delta) {
+            reflowWorkItem?.cancel()
+            applyLayoutAndUpdateExpected(for: layout)
+            return
+        }
+
         if found.slot.nestedIndex != nil {
             handleNestedWindowResize(in: layout, slot: found.slot, delta: delta)
         } else {
@@ -3166,6 +3180,20 @@ class WindowManager {
         var rightEdge: CGFloat = 0  // positive = moved right
         var topEdge: CGFloat = 0    // positive = moved down (in AX coords)
         var bottomEdge: CGFloat = 0 // positive = moved down (in AX coords)
+    }
+
+    /// Whether a change is a move rather than a resize: every edge travelled
+    /// together, so the window is the same size somewhere else.
+    ///
+    /// The tolerance is generous because apps rarely land on the exact pixel
+    /// asked of them — Terminal snaps to character cells, and a few points of
+    /// slop while being dragged should not read as a resize.
+    private func isMove(_ delta: FrameDelta) -> Bool {
+        let widthChange = delta.rightEdge - delta.leftEdge
+        let heightChange = delta.bottomEdge - delta.topEdge
+        let travelled = max(abs(delta.leftEdge), abs(delta.topEdge))
+
+        return travelled > 5 && abs(widthChange) <= 8 && abs(heightChange) <= 8
     }
 
     private func detectFrameChange(from oldFrame: CGRect, to newFrame: CGRect) -> FrameDelta? {
