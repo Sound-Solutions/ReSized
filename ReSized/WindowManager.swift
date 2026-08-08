@@ -212,14 +212,19 @@ struct LayoutWindowNode: Identifiable, Equatable {
     }
 }
 
-/// A container that can hold windows or other containers
+/// A split holding windows side by side or stacked.
+///
+/// Children are windows and only windows. A container used to be able to hold
+/// another container, but nothing in the UI could build one and the preview
+/// rendered it as the literal text "Nested" — so the nesting is gone and the
+/// invalid state is now unrepresentable rather than merely unreachable.
 struct LayoutContainer: Identifiable, Equatable {
     let id: UUID
     var direction: SplitDirection
-    var children: [LayoutNode]
+    var children: [LayoutWindowNode]
     var proportion: CGFloat
 
-    init(direction: SplitDirection, children: [LayoutNode] = [], proportion: CGFloat = 1.0) {
+    init(direction: SplitDirection, children: [LayoutWindowNode] = [], proportion: CGFloat = 1.0) {
         self.id = UUID()
         self.direction = direction
         self.children = children
@@ -237,83 +242,23 @@ struct LayoutContainer: Identifiable, Equatable {
         }
     }
 
-    /// Get all windows in this container recursively
+    /// Get all windows in this container
     var allWindows: [ExternalWindow] {
-        children.flatMap { child -> [ExternalWindow] in
-            switch child {
-            case .window(let node):
-                return [node.window]
-            case .container(let container):
-                return container.allWindows
-            }
-        }
+        children.map(\.window)
     }
 
-    /// Drop windows that `isDead` reports as gone, recursing into child
-    /// containers and collapsing any that empty out. Returns true if anything
-    /// was removed, so the caller knows whether to rebuild the cell.
+    /// Drop windows that `isDead` reports as gone. Returns true if anything was
+    /// removed, so the caller knows whether to rebuild the cell.
     ///
     /// Closed-window detection only ever walked top-level cells, so a window
     /// closed inside a split stayed in the layout indefinitely.
     mutating func pruneDeadWindows(isDead: (ExternalWindow) -> Bool) -> Bool {
-        var removedAny = false
-        var surviving: [LayoutNode] = []
+        let surviving = children.filter { !isDead($0.window) }
+        guard surviving.count != children.count else { return false }
 
-        for child in children {
-            switch child {
-            case .window(let node):
-                if isDead(node.window) {
-                    removedAny = true
-                } else {
-                    surviving.append(child)
-                }
-            case .container(var nested):
-                if nested.pruneDeadWindows(isDead: isDead) {
-                    removedAny = true
-                }
-                // An emptied-out child container is just noise; drop it.
-                if !nested.children.isEmpty {
-                    surviving.append(.container(nested))
-                }
-            }
-        }
-
-        guard removedAny else { return false }
         children = surviving
         normalizeProportions()
         return true
-    }
-}
-
-/// A node in the layout tree - either a window or a nested container
-enum LayoutNode: Identifiable, Equatable {
-    case window(LayoutWindowNode)
-    case container(LayoutContainer)
-
-    var id: UUID {
-        switch self {
-        case .window(let node): return node.id
-        case .container(let container): return container.id
-        }
-    }
-
-    var proportion: CGFloat {
-        get {
-            switch self {
-            case .window(let node): return node.proportion
-            case .container(let container): return container.proportion
-            }
-        }
-        set {
-            switch self {
-            case .window(var node):
-                node.proportion = newValue
-                self = .window(node)
-            case .container(var container):
-                container.proportion = newValue
-                self = .container(container)
-            }
-        }
     }
 }
 
@@ -1806,7 +1751,7 @@ class WindowManager: ObservableObject {
                 let childWidth = isLast ? (frame.maxX - currentX) : (child.proportion * frame.width)
                 let childFrame = CGRect(x: currentX, y: frame.minY, width: childWidth, height: frame.height)
 
-                applyLayoutToNode(child, in: childFrame)
+                _ = child.window.setFrame(constrainFrame(childFrame, for: child.window))
                 currentX += childWidth
             }
         } else {
@@ -1817,20 +1762,9 @@ class WindowManager: ObservableObject {
                 let childHeight = isLast ? (currentTop - frame.minY) : (child.proportion * frame.height)
                 let childFrame = CGRect(x: frame.minX, y: currentTop - childHeight, width: frame.width, height: childHeight)
 
-                applyLayoutToNode(child, in: childFrame)
+                _ = child.window.setFrame(constrainFrame(childFrame, for: child.window))
                 currentTop -= childHeight
             }
-        }
-    }
-
-    /// Apply layout to a single layout node (window or container)
-    private func applyLayoutToNode(_ node: LayoutNode, in frame: CGRect) {
-        switch node {
-        case .window(let windowNode):
-            let constrainedFrame = constrainFrame(frame, for: windowNode.window)
-            _ = windowNode.window.setFrame(constrainedFrame)
-        case .container(let nestedContainer):
-            applyNestedContainerLayout(container: nestedContainer, in: frame)
         }
     }
 
@@ -1848,7 +1782,7 @@ class WindowManager: ObservableObject {
         let windowNode = LayoutWindowNode(window: window, proportion: 0.5)
         let container = LayoutContainer(
             direction: direction,
-            children: [.window(windowNode)],
+            children: [windowNode],
             proportion: 1.0
         )
 
@@ -1891,7 +1825,7 @@ class WindowManager: ObservableObject {
         let windowNode = LayoutWindowNode(window: window, proportion: 0.5)
         let container = LayoutContainer(
             direction: direction,
-            children: [.window(windowNode)],
+            children: [windowNode],
             proportion: 1.0
         )
 
@@ -1930,7 +1864,7 @@ class WindowManager: ObservableObject {
 
         // Add window to the container
         let windowNode = LayoutWindowNode(window: window, proportion: 0.5)
-        container.children.append(.window(windowNode))
+        container.children.append(windowNode)
         container.normalizeProportions()
 
         // Create new cell with updated container
@@ -1969,7 +1903,7 @@ class WindowManager: ObservableObject {
 
         // Add window to the container
         let windowNode = LayoutWindowNode(window: window, proportion: 0.5)
-        container.children.append(.window(windowNode))
+        container.children.append(windowNode)
         container.normalizeProportions()
 
         // Create new cell with updated container
@@ -2023,7 +1957,8 @@ class WindowManager: ObservableObject {
                     updatedColumns[columnIndex].windows[i].heightProportion = newProportion
                 }
             }
-        } else if container.children.count == 1, case .window(let node) = container.children[0] {
+        } else if container.children.count == 1 {
+            let node = container.children[0]
             // Convert back to a single window cell
             updatedColumns[columnIndex].windows[windowIndex] = ColumnWindow(
                 id: updatedColumns[columnIndex].windows[windowIndex].id,
@@ -2065,7 +2000,8 @@ class WindowManager: ObservableObject {
                     updatedRows[rowIndex].windows[i].widthProportion = newProportion
                 }
             }
-        } else if container.children.count == 1, case .window(let node) = container.children[0] {
+        } else if container.children.count == 1 {
+            let node = container.children[0]
             // Convert back to a single window cell
             updatedRows[rowIndex].windows[windowIndex] = RowWindow(
                 id: updatedRows[rowIndex].windows[windowIndex].id,
@@ -2136,19 +2072,12 @@ class WindowManager: ObservableObject {
                   columnIndex: columnIndex, rowIndex: rowIndex, windowIndex: windowIndex
               ),
               container.children.indices.contains(from),
-              container.children.indices.contains(to),
-              case .window(let firstNode) = container.children[from],
-              case .window(let secondNode) = container.children[to]
+              container.children.indices.contains(to)
         else { return }
 
-        var first = firstNode
-        var second = secondNode
-        let carried = first.window
-        first.window = second.window
-        second.window = carried
-
-        container.children[from] = .window(first)
-        container.children[to] = .window(second)
+        let carried = container.children[from].window
+        container.children[from].window = container.children[to].window
+        container.children[to].window = carried
 
         setNestedContainer(container, columnIndex: columnIndex, rowIndex: rowIndex, windowIndex: windowIndex)
         applyLayoutIfActive()
@@ -2739,7 +2668,8 @@ class WindowManager: ObservableObject {
             guard container.pruneDeadWindows(isDead: isWindowGone) else { return false }
 
             let cell = layout.columns[col].windows[idx]
-            if container.children.count == 1, case .window(let node) = container.children[0] {
+            if container.children.count == 1 {
+                let node = container.children[0]
                 layout.columns[col].windows[idx] = ColumnWindow(
                     id: cell.id, window: node.window, heightProportion: cell.heightProportion
                 )
@@ -2758,7 +2688,8 @@ class WindowManager: ObservableObject {
             guard container.pruneDeadWindows(isDead: isWindowGone) else { return false }
 
             let cell = layout.rows[row].windows[idx]
-            if container.children.count == 1, case .window(let node) = container.children[0] {
+            if container.children.count == 1 {
+                let node = container.children[0]
                 layout.rows[row].windows[idx] = RowWindow(
                     id: cell.id, window: node.window, widthProportion: cell.widthProportion
                 )
@@ -3257,19 +3188,7 @@ class WindowManager: ObservableObject {
     private func savedContainer(from container: LayoutContainer) -> SavedNestedContainer {
         SavedNestedContainer(
             direction: container.direction.rawValue,
-            children: container.children.map { child in
-                switch child {
-                case .window(let node):
-                    return savedSlot(for: node.window, proportion: node.proportion)
-                case .container(let nested):
-                    return SavedWindowSlot(
-                        ownerName: "",
-                        windowTitle: nil,
-                        proportion: nested.proportion,
-                        nested: savedContainer(from: nested)
-                    )
-                }
-            }
+            children: container.children.map { savedSlot(for: $0.window, proportion: $0.proportion) }
         )
     }
 
@@ -3510,18 +3429,20 @@ class WindowManager: ObservableObject {
         excluding usedIds: inout Set<UUID>
     ) -> LayoutContainer? {
         let direction = SplitDirection(rawValue: saved.direction) ?? .horizontal
-        var children: [LayoutNode] = []
+        var children: [LayoutWindowNode] = []
 
         for slot in saved.children {
             if let nestedSaved = slot.nested {
-                if let nested = restoreContainer(from: nestedSaved, excluding: &usedIds) {
-                    var sized = nested
-                    sized.proportion = slot.proportion
-                    children.append(.container(sized))
+                // Splits can no longer hold splits, but presets written before
+                // that could. Flatten the old shape into this level — scaling
+                // each grandchild by its parent's share — rather than dropping
+                // windows the user had placed.
+                for grandchild in flattenedLeaves(of: nestedSaved, scaledBy: slot.proportion, excluding: &usedIds) {
+                    children.append(grandchild)
                 }
             } else if let match = findMatchingWindow(for: slot, excluding: usedIds) {
                 usedIds.insert(match.id)
-                children.append(.window(LayoutWindowNode(window: match, proportion: slot.proportion)))
+                children.append(LayoutWindowNode(window: match, proportion: slot.proportion))
             }
         }
 
@@ -3530,6 +3451,33 @@ class WindowManager: ObservableObject {
         var container = LayoutContainer(direction: direction, children: children)
         container.normalizeProportions()
         return container
+    }
+
+    /// Every window leaf of a legacy nested-inside-nested split, with each leaf's
+    /// proportion multiplied through its ancestors' shares so a flattened split
+    /// keeps roughly the sizes the user last saw. Only ever reached by presets
+    /// saved while containers could hold containers.
+    private func flattenedLeaves(
+        of saved: SavedNestedContainer,
+        scaledBy scale: CGFloat,
+        excluding usedIds: inout Set<UUID>
+    ) -> [LayoutWindowNode] {
+        var leaves: [LayoutWindowNode] = []
+
+        for slot in saved.children {
+            if let nestedSaved = slot.nested {
+                leaves += flattenedLeaves(
+                    of: nestedSaved,
+                    scaledBy: scale * slot.proportion,
+                    excluding: &usedIds
+                )
+            } else if let match = findMatchingWindow(for: slot, excluding: usedIds) {
+                usedIds.insert(match.id)
+                leaves.append(LayoutWindowNode(window: match, proportion: scale * slot.proportion))
+            }
+        }
+
+        return leaves
     }
 
     /// List all saved layouts
@@ -3662,8 +3610,10 @@ struct SavedRow: Codable {
     let windows: [SavedWindowSlot]
 }
 
-/// A saved nested split. Children are SavedWindowSlots, which may themselves be
-/// nested, so the structure recurses the same way LayoutNode does.
+/// A saved split. Children are SavedWindowSlots, which the encoder now only ever
+/// writes as plain windows — splits can no longer hold splits. The recursion is
+/// kept in the shape so presets written before that still decode; restore
+/// flattens any it finds. See `flattenedLeaves`.
 struct SavedNestedContainer: Codable {
     let direction: String           // SplitDirection.rawValue
     let children: [SavedWindowSlot]

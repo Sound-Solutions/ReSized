@@ -1157,25 +1157,15 @@ struct NestedContainerPreview: View {
                 ? CGSize(width: size.width * child.proportion, height: size.height)
                 : CGSize(width: size.width, height: size.height * child.proportion)
 
-            switch child {
-            case .window(let windowNode):
-                NestedWindowTile(
-                    windowNode: windowNode,
-                    nestedIndex: index,
-                    columnIndex: columnIndex,
-                    rowIndex: rowIndex,
-                    windowIndex: windowIndex,
-                    isInColumn: isInColumn
-                )
-                .frame(width: childSize.width, height: childSize.height)
-            case .container:
-                // Deeper nesting - show placeholder for now
-                Text("Nested")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(width: childSize.width, height: childSize.height)
-                    .background(Color(nsColor: .controlBackgroundColor))
-            }
+            NestedWindowTile(
+                windowNode: child,
+                nestedIndex: index,
+                columnIndex: columnIndex,
+                rowIndex: rowIndex,
+                windowIndex: windowIndex,
+                isInColumn: isInColumn
+            )
+            .frame(width: childSize.width, height: childSize.height)
 
             // Add divider between children (not after last)
             if index < container.children.count - 1 {
@@ -2393,26 +2383,21 @@ struct ActiveNestedContainerTile: View {
     }
 
     @ViewBuilder
-    private func nodeView(_ node: LayoutNode, proportion: CGFloat) -> some View {
-        switch node {
-        case .window(let windowNode):
-            VStack(spacing: 2) {
-                Text(windowNode.window.ownerName)
-                    .font(.caption2)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
-                Text(windowNode.window.title)
-                    .font(.system(size: 8))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(colorForApp(windowNode.window.ownerName))
-            .onTapGesture {
-                windowNode.window.raise()
-            }
-        case .container(let nestedContainer):
-            ActiveNestedContainerTile(container: nestedContainer, isColumn: isColumn, columnIndex: columnIndex, rowIndex: rowIndex, windowIndex: windowIndex)
+    private func nodeView(_ node: LayoutWindowNode, proportion: CGFloat) -> some View {
+        VStack(spacing: 2) {
+            Text(node.window.ownerName)
+                .font(.caption2)
+                .fontWeight(.medium)
+                .lineLimit(1)
+            Text(node.window.title)
+                .font(.system(size: 8))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(colorForApp(node.window.ownerName))
+        .onTapGesture {
+            node.window.raise()
         }
     }
 
