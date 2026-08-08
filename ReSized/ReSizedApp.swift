@@ -68,10 +68,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // ID 20-28 = load workspace preset 1-9 (all monitors)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Check accessibility permissions on launch
-        if !AccessibilityHelper.checkAccessibilityPermissions() {
-            AccessibilityHelper.requestAccessibilityPermissions()
-        }
+        // Deliberately does NOT prompt for accessibility here. The system dialog
+        // used to fire on every launch before the user had seen anything of ours,
+        // and then sat on top of our own permission overlay saying the same thing
+        // twice. PermissionOverlay owns this flow now and sends people straight
+        // to the Accessibility pane.
 
         setupMenuBar()
         registerAllHotKeys()

@@ -19,8 +19,9 @@ struct WindowDragData: Codable, Transferable {
 // MARK: - Permission Overlay (First Launch)
 
 struct PermissionOverlay: View {
+    /// Opens the Accessibility pane. There is intentionally no path here that
+    /// raises the system's own permission dialog — one prompt, ours.
     var onGrantAccess: () -> Void
-    var onOpenSettings: () -> Void
     var onRelaunch: () -> Void
 
     var body: some View {
@@ -48,25 +49,22 @@ struct PermissionOverlay: View {
                 .buttonStyle(.borderedProminent)
                 .padding(.top, 8)
 
-                // Escape hatches. macOS sometimes keeps reporting a process as
-                // untrusted until it restarts, even after the checkbox is ticked,
-                // so there has to be a way out of this overlay that isn't "quit
-                // and relaunch by hand".
-                HStack(spacing: 12) {
-                    Button("Open System Settings") {
-                        onOpenSettings()
-                    }
-                    Button("Already Granted — Relaunch") {
-                        onRelaunch()
-                    }
-                }
-                .controlSize(.small)
-
-                Text("If you've already granted access, relaunching makes macOS re-check.")
+                Text("Opens Privacy & Security → Accessibility. Tick ReSized in the list.")
                     .font(.caption2)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: 280)
+
+                Divider()
+                    .frame(maxWidth: 200)
+
+                // Escape hatch: macOS sometimes keeps reporting an already-running
+                // process as untrusted until it restarts, so there has to be a way
+                // out of this overlay that isn't "quit and relaunch by hand".
+                Button("Already Granted — Relaunch") {
+                    onRelaunch()
+                }
+                .controlSize(.small)
             }
             .padding(24)
             .background(Color(NSColor.windowBackgroundColor))
@@ -176,10 +174,6 @@ struct ContentView: View {
                         if !hasAccessibilityPermission {
                             PermissionOverlay(
                                 onGrantAccess: {
-                                    AccessibilityHelper.requestAccessibilityPermissions()
-                                    startPermissionPolling()
-                                },
-                                onOpenSettings: {
                                     AccessibilityHelper.openAccessibilityPreferences()
                                     startPermissionPolling()
                                 },
@@ -1414,11 +1408,15 @@ struct ColumnDividerHandle: View {
     @State private var isDragging = false
     @State private var initialFirst: CGFloat = 0
     @State private var initialSecond: CGFloat = 0
+    @State private var dragOffset: CGFloat = 0
 
     var body: some View {
         Rectangle()
             .fill(isDragging ? Color.accentColor : Color(nsColor: .separatorColor))
             .frame(width: 8)
+            // Purely visual while dragging — the layout itself is untouched until
+            // the mouse comes up.
+            .offset(x: dragOffset)
             .contentShape(Rectangle())
             .gesture(
                 // .global on purpose: the default .local space is the handle's own
@@ -1433,8 +1431,20 @@ struct ColumnDividerHandle: View {
                             guard dividerIndex + 1 < columns.count else { return }
                             initialFirst = columns[dividerIndex].widthProportion
                             initialSecond = columns[dividerIndex + 1].widthProportion
-                            windowManager.beginInteractiveResize()
                         }
+                        guard trackWidth > 0 else { return }
+                        // Slide only as far as the split will actually absorb, so
+                        // the line never sits somewhere the layout won't follow.
+                        let shift = WindowManager.achievableShift(
+                            first: initialFirst,
+                            second: initialSecond,
+                            requested: value.translation.width / trackWidth
+                        )
+                        dragOffset = shift * trackWidth
+                    }
+                    .onEnded { value in
+                        isDragging = false
+                        dragOffset = 0
                         guard trackWidth > 0 else { return }
                         windowManager.resizeColumnDivider(
                             atIndex: dividerIndex,
@@ -1442,10 +1452,6 @@ struct ColumnDividerHandle: View {
                             initialSecond: initialSecond,
                             proportionalTranslation: value.translation.width / trackWidth
                         )
-                    }
-                    .onEnded { _ in
-                        isDragging = false
-                        windowManager.endInteractiveResize()
                     }
             )
             .onHover { hovering in
@@ -1467,11 +1473,13 @@ struct RowDividerHandle: View {
     @State private var isDragging = false
     @State private var initialFirst: CGFloat = 0
     @State private var initialSecond: CGFloat = 0
+    @State private var dragOffset: CGFloat = 0
 
     var body: some View {
         Rectangle()
             .fill(isDragging ? Color.accentColor : Color(nsColor: .separatorColor))
             .frame(height: 6)
+            .offset(y: dragOffset)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
@@ -1483,8 +1491,18 @@ struct RowDividerHandle: View {
                                   dividerIndex + 1 < columns[columnIndex].windows.count else { return }
                             initialFirst = columns[columnIndex].windows[dividerIndex].heightProportion
                             initialSecond = columns[columnIndex].windows[dividerIndex + 1].heightProportion
-                            windowManager.beginInteractiveResize()
                         }
+                        guard trackHeight > 0 else { return }
+                        let shift = WindowManager.achievableShift(
+                            first: initialFirst,
+                            second: initialSecond,
+                            requested: value.translation.height / trackHeight
+                        )
+                        dragOffset = shift * trackHeight
+                    }
+                    .onEnded { value in
+                        isDragging = false
+                        dragOffset = 0
                         guard trackHeight > 0 else { return }
                         windowManager.resizeRowDivider(
                             inColumn: columnIndex,
@@ -1493,10 +1511,6 @@ struct RowDividerHandle: View {
                             initialSecond: initialSecond,
                             proportionalTranslation: value.translation.height / trackHeight
                         )
-                    }
-                    .onEnded { _ in
-                        isDragging = false
-                        windowManager.endInteractiveResize()
                     }
             )
             .onHover { hovering in
@@ -1724,11 +1738,13 @@ struct RowPrimaryDividerHandle: View {
     @State private var isDragging = false
     @State private var initialFirst: CGFloat = 0
     @State private var initialSecond: CGFloat = 0
+    @State private var dragOffset: CGFloat = 0
 
     var body: some View {
         Rectangle()
             .fill(isDragging ? Color.accentColor : Color(nsColor: .separatorColor))
             .frame(height: 8)
+            .offset(y: dragOffset)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
@@ -1739,8 +1755,18 @@ struct RowPrimaryDividerHandle: View {
                             guard dividerIndex + 1 < rows.count else { return }
                             initialFirst = rows[dividerIndex].heightProportion
                             initialSecond = rows[dividerIndex + 1].heightProportion
-                            windowManager.beginInteractiveResize()
                         }
+                        guard trackHeight > 0 else { return }
+                        let shift = WindowManager.achievableShift(
+                            first: initialFirst,
+                            second: initialSecond,
+                            requested: value.translation.height / trackHeight
+                        )
+                        dragOffset = shift * trackHeight
+                    }
+                    .onEnded { value in
+                        isDragging = false
+                        dragOffset = 0
                         guard trackHeight > 0 else { return }
                         windowManager.resizeRowPrimaryDivider(
                             atIndex: dividerIndex,
@@ -1748,10 +1774,6 @@ struct RowPrimaryDividerHandle: View {
                             initialSecond: initialSecond,
                             proportionalTranslation: value.translation.height / trackHeight
                         )
-                    }
-                    .onEnded { _ in
-                        isDragging = false
-                        windowManager.endInteractiveResize()
                     }
             )
             .onHover { hovering in
@@ -1774,11 +1796,13 @@ struct RowWindowDividerHandle: View {
     @State private var isDragging = false
     @State private var initialFirst: CGFloat = 0
     @State private var initialSecond: CGFloat = 0
+    @State private var dragOffset: CGFloat = 0
 
     var body: some View {
         Rectangle()
             .fill(isDragging ? Color.accentColor : Color(nsColor: .separatorColor))
             .frame(width: 6)
+            .offset(x: dragOffset)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
@@ -1790,8 +1814,18 @@ struct RowWindowDividerHandle: View {
                                   dividerIndex + 1 < rows[rowIndex].windows.count else { return }
                             initialFirst = rows[rowIndex].windows[dividerIndex].widthProportion
                             initialSecond = rows[rowIndex].windows[dividerIndex + 1].widthProportion
-                            windowManager.beginInteractiveResize()
                         }
+                        guard trackWidth > 0 else { return }
+                        let shift = WindowManager.achievableShift(
+                            first: initialFirst,
+                            second: initialSecond,
+                            requested: value.translation.width / trackWidth
+                        )
+                        dragOffset = shift * trackWidth
+                    }
+                    .onEnded { value in
+                        isDragging = false
+                        dragOffset = 0
                         guard trackWidth > 0 else { return }
                         windowManager.resizeWindowDivider(
                             inRow: rowIndex,
@@ -1800,10 +1834,6 @@ struct RowWindowDividerHandle: View {
                             initialSecond: initialSecond,
                             proportionalTranslation: value.translation.width / trackWidth
                         )
-                    }
-                    .onEnded { _ in
-                        isDragging = false
-                        windowManager.endInteractiveResize()
                     }
             )
             .onHover { hovering in

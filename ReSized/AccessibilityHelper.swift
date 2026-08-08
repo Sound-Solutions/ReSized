@@ -35,13 +35,13 @@ struct AccessibilityHelper {
         return AXIsProcessTrustedWithOptions(options)
     }
 
-    /// Request accessibility permissions (shows system prompt)
-    static func requestAccessibilityPermissions() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        AXIsProcessTrustedWithOptions(options)
-    }
+    // NOTE: there is deliberately no requestAccessibilityPermissions() here.
+    // Passing kAXTrustedCheckOptionPrompt: true raises the system dialog, which
+    // duplicated our own overlay and popped up unbidden at launch. We drive the
+    // user to the Accessibility pane ourselves instead — checkAccessibilityPermissions()
+    // above passes prompt: false and never raises anything.
 
-    /// Open System Preferences to Accessibility pane
+    /// Open System Settings to the Accessibility pane
     static func openAccessibilityPreferences() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)

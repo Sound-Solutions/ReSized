@@ -1495,10 +1495,21 @@ class WindowManager: ObservableObject {
     /// Minimum share of a track that any single pane may occupy
     static let minPaneProportion: CGFloat = 0.1
 
+    /// How much of a requested shift the split can actually absorb.
+    ///
+    /// Divider handles use this to slide exactly as far as the drag will really
+    /// move things, so the line never travels somewhere the layout won't follow.
+    static func achievableShift(first: CGFloat, second: CGFloat, requested: CGFloat) -> CGFloat {
+        guard let (newFirst, _) = resolveSplit(first: first, second: second, delta: requested) else {
+            return 0
+        }
+        return newFirst - first
+    }
+
     /// Shift `delta` out of the second pane and into the first, clamping at the
     /// minimum rather than rejecting the whole gesture. Returns nil if there
     /// isn't room for two panes at all.
-    private static func resolveSplit(first: CGFloat, second: CGFloat, delta: CGFloat) -> (CGFloat, CGFloat)? {
+    static func resolveSplit(first: CGFloat, second: CGFloat, delta: CGFloat) -> (CGFloat, CGFloat)? {
         let total = first + second
         guard total > minPaneProportion * 2 else { return nil }
         let clamped = min(max(first + delta, minPaneProportion), total - minPaneProportion)
