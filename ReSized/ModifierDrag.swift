@@ -19,11 +19,17 @@ final class ModifierDragMonitor {
     private var runLoopSource: CFRunLoopSource?
     private var dragging = false
 
-    /// fn, or option+shift. fn is the wanted gesture; ⌥⇧ is the fallback for
+    /// fn, or command+shift. fn is the wanted gesture; ⌘⇧ is the fallback for
     /// keyboards that never report fn. If fn proves flaky, delete its line.
+    ///
+    /// The fallback must not contain ⌥: macOS's own window tiling claims
+    /// option-drag (Sequoia's "hold ⌥ while dragging to tile"), painting a
+    /// half-screen preview over our band and tiling the window on release.
+    /// ⌘-drag on a title bar is a plain drag that doesn't even raise the
+    /// window, which suits a placement gesture.
     static func isArmed(_ flags: CGEventFlags) -> Bool {
         if flags.contains(.maskSecondaryFn) { return true }
-        return flags.contains(.maskAlternate) && flags.contains(.maskShift)
+        return flags.contains(.maskCommand) && flags.contains(.maskShift)
     }
 
     func start() {
