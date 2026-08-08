@@ -13,6 +13,22 @@ struct WindowDragData: Codable, Transferable {
     /// Which pane of a split this came from, when dragged out of one.
     var sourceNestedIndex: Int? = nil
 
+    /// Where in the layout this drag started, or nil when it started in the
+    /// sidebar and so has no slot to vacate.
+    var sourceSlot: WindowSlot? {
+        guard externalWindowId == nil,
+              let sourceIndex,
+              sourceColumn != nil || sourceRow != nil
+        else { return nil }
+
+        return WindowSlot(
+            columnIndex: sourceColumn,
+            rowIndex: sourceRow,
+            windowIndex: sourceIndex,
+            nestedIndex: sourceNestedIndex
+        )
+    }
+
     static var transferRepresentation: some TransferRepresentation {
         CodableRepresentation(contentType: .json)
     }
@@ -1220,6 +1236,15 @@ struct NestedWindowTile: View {
     @EnvironmentObject var windowManager: WindowManager
     @State private var isDropTarget = false
 
+    private var slot: WindowSlot {
+        WindowSlot(
+            columnIndex: columnIndex,
+            rowIndex: rowIndex,
+            windowIndex: windowIndex,
+            nestedIndex: nestedIndex
+        )
+    }
+
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 1) {
@@ -1267,23 +1292,16 @@ struct NestedWindowTile: View {
             sourceNestedIndex: nestedIndex
         ))
         .dropDestination(for: WindowDragData.self) { items, _ in
+            // Anything already placed in this layout — another pane of this
+            // split, a pane of some other split, or a plain cell in another
+            // column or row — trades places with this one. Sidebar drags carry
+            // no source slot and belong to the split behind this pane.
             guard let drag = items.first,
-                  let from = drag.sourceNestedIndex,
-                  from != nestedIndex,
-                  // Only within the same split — dragging between different
-                  // splits is a move, not a swap, and isn't handled here.
-                  drag.sourceColumn == columnIndex,
-                  drag.sourceRow == rowIndex,
-                  drag.sourceIndex == windowIndex
+                  let source = drag.sourceSlot,
+                  source != slot
             else { return false }
 
-            windowManager.swapNestedWindows(
-                columnIndex: columnIndex,
-                rowIndex: rowIndex,
-                windowIndex: windowIndex,
-                from: from,
-                to: nestedIndex
-            )
+            windowManager.swapWindows(source, slot)
             return true
         } isTargeted: { targeted in
             isDropTarget = targeted
@@ -1399,6 +1417,11 @@ struct NestedDropZone: View {
     @EnvironmentObject var windowManager: WindowManager
     @State private var isDropTarget = false
 
+    /// The cell holding the split this zone adds to.
+    private var slot: WindowSlot {
+        WindowSlot(columnIndex: columnIndex, rowIndex: rowIndex, windowIndex: windowIndex, nestedIndex: nil)
+    }
+
     var body: some View {
         VStack {
             Image(systemName: "plus")
@@ -1428,35 +1451,10 @@ struct NestedDropZone: View {
                 return true
             }
 
-            // Dragging from another column
-            if let sourceCol = dragData.sourceColumn, let sourceIndex = dragData.sourceIndex {
-                guard sourceCol < windowManager.columns.count,
-                      sourceIndex < windowManager.columns[sourceCol].windows.count,
-                      let window = windowManager.columns[sourceCol].windows[sourceIndex].window else {
-                    return false
-                }
-                // Remove from source first
-                windowManager.removeWindow(dragData.windowId, fromColumn: sourceCol)
-                // Add to nested container
-                if isInColumn, let colIndex = columnIndex {
-                    windowManager.addWindowToColumnNested(columnIndex: colIndex, windowIndex: windowIndex, window: window)
-                }
-                return true
-            }
-
-            // Dragging from another row
-            if let sourceRow = dragData.sourceRow, let sourceIndex = dragData.sourceIndex {
-                guard sourceRow < windowManager.rows.count,
-                      sourceIndex < windowManager.rows[sourceRow].windows.count,
-                      let window = windowManager.rows[sourceRow].windows[sourceIndex].window else {
-                    return false
-                }
-                // Remove from source first
-                windowManager.removeWindow(dragData.windowId, fromRow: sourceRow)
-                // Add to nested container
-                if let rIndex = rowIndex {
-                    windowManager.addWindowToRowNested(rowIndex: rIndex, windowIndex: windowIndex, window: window)
-                }
+            // Anything already placed: a plain cell from another column or row,
+            // or a pane lifted out of some other split.
+            if let source = dragData.sourceSlot {
+                windowManager.moveWindow(from: source, intoSplitAt: slot)
                 return true
             }
 

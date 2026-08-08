@@ -262,6 +262,18 @@ struct LayoutContainer: Identifiable, Equatable {
     }
 }
 
+/// Where a window sits in a layout: which column or row, which cell within it,
+/// and which pane of that cell's split — `nestedIndex` is nil when the cell
+/// holds the window directly.
+///
+/// Exactly one of `columnIndex`/`rowIndex` is set, matching the layout's mode.
+struct WindowSlot: Equatable {
+    var columnIndex: Int?
+    var rowIndex: Int?
+    var windowIndex: Int
+    var nestedIndex: Int?
+}
+
 /// App state for the setup flow
 enum AppState {
     case modeSelect     // First open: choosing layout mode (columns vs rows)
@@ -1306,7 +1318,34 @@ class WindowManager: ObservableObject {
             return
         }
 
-        // Case 2: Dragging within same column (reordering)
+        // Case 2: Dragging a pane out of a split, into this column as its own
+        // cell. Checked before the same-column reorder below, which would
+        // otherwise move the whole split rather than the one pane.
+        if let sourceColumn = dragData.sourceColumn,
+           let sourceIndex = dragData.sourceIndex,
+           let sourceNestedIndex = dragData.sourceNestedIndex {
+            let slot = WindowSlot(
+                columnIndex: sourceColumn,
+                rowIndex: nil,
+                windowIndex: sourceIndex,
+                nestedIndex: sourceNestedIndex
+            )
+            // Emptying a split deletes its cell, which shifts everything below
+            // it up; draining it to one pane only collapses the cell in place.
+            // Compare the counts rather than assuming either.
+            let before = columns[sourceColumn].windows.count
+            guard let window = extractNestedWindow(at: slot) else { return }
+            let cellWasRemoved = columns[sourceColumn].windows.count < before
+
+            var landing = atIndex
+            if cellWasRemoved, sourceColumn == targetColumn, atIndex > sourceIndex {
+                landing -= 1
+            }
+            addWindow(window, toColumn: targetColumn, atIndex: landing)
+            return
+        }
+
+        // Case 3: Dragging within same column (reordering)
         if let sourceColumn = dragData.sourceColumn, sourceColumn == targetColumn {
             if let sourceIndex = dragData.sourceIndex {
                 reorderWindowInColumn(columnIndex: sourceColumn, fromIndex: sourceIndex, toIndex: atIndex)
@@ -1314,7 +1353,7 @@ class WindowManager: ObservableObject {
             return
         }
 
-        // Case 3: Dragging from another column
+        // Case 4: Dragging from another column
         if let sourceColumn = dragData.sourceColumn {
             // Find the window and move it
             if let windowIndex = columns[sourceColumn].windows.firstIndex(where: { $0.id == dragData.windowId }),
@@ -1354,7 +1393,30 @@ class WindowManager: ObservableObject {
             return
         }
 
-        // Case 2: Dragging within same row (reordering)
+        // Case 2: Dragging a pane out of a split, into this row as its own cell.
+        // See the column equivalent for why this precedes the reorder.
+        if let sourceRow = dragData.sourceRow,
+           let sourceIndex = dragData.sourceIndex,
+           let sourceNestedIndex = dragData.sourceNestedIndex {
+            let slot = WindowSlot(
+                columnIndex: nil,
+                rowIndex: sourceRow,
+                windowIndex: sourceIndex,
+                nestedIndex: sourceNestedIndex
+            )
+            let before = rows[sourceRow].windows.count
+            guard let window = extractNestedWindow(at: slot) else { return }
+            let cellWasRemoved = rows[sourceRow].windows.count < before
+
+            var landing = atIndex
+            if cellWasRemoved, sourceRow == targetRow, atIndex > sourceIndex {
+                landing -= 1
+            }
+            addWindow(window, toRow: targetRow, atIndex: landing)
+            return
+        }
+
+        // Case 3: Dragging within same row (reordering)
         if let sourceRow = dragData.sourceRow, sourceRow == targetRow {
             if let sourceIndex = dragData.sourceIndex {
                 reorderWindowInRow(rowIndex: sourceRow, fromIndex: sourceIndex, toIndex: atIndex)
@@ -1362,7 +1424,7 @@ class WindowManager: ObservableObject {
             return
         }
 
-        // Case 3: Dragging from another row
+        // Case 4: Dragging from another row
         if let sourceRow = dragData.sourceRow {
             // Find the window and move it
             if let windowIndex = rows[sourceRow].windows.firstIndex(where: { $0.id == dragData.windowId }),
@@ -2020,6 +2082,239 @@ class WindowManager: ObservableObject {
         }
     }
 
+    // MARK: - Slot Addressing
+
+    /// The window occupying a slot, whether it sits in the cell directly or in
+    /// one of the cell's split panes.
+    func window(at slot: WindowSlot) -> ExternalWindow? {
+        guard let cell = cell(at: slot) else { return nil }
+        guard let nestedIndex = slot.nestedIndex else { return cell.window }
+        guard let container = cell.container,
+              container.children.indices.contains(nestedIndex) else { return nil }
+        return container.children[nestedIndex].window
+    }
+
+    /// Put a window into a slot, leaving the slot's size and identity alone.
+    /// Does nothing if the slot doesn't exist or names a pane of a cell that
+    /// holds no split.
+    private func setWindow(_ window: ExternalWindow, at slot: WindowSlot) {
+        guard let cell = cell(at: slot) else { return }
+
+        if let nestedIndex = slot.nestedIndex {
+            guard var container = cell.container,
+                  container.children.indices.contains(nestedIndex) else { return }
+            container.children[nestedIndex].window = window
+            setNestedContainer(
+                container,
+                columnIndex: slot.columnIndex,
+                rowIndex: slot.rowIndex,
+                windowIndex: slot.windowIndex
+            )
+            return
+        }
+
+        guard cell.window != nil else { return }
+        if let columnIndex = slot.columnIndex {
+            var updated = columns
+            updated[columnIndex].windows[slot.windowIndex].window = window
+            columns = updated
+        } else if let rowIndex = slot.rowIndex {
+            var updated = rows
+            updated[rowIndex].windows[slot.windowIndex].window = window
+            rows = updated
+        }
+    }
+
+    /// The cell a slot addresses, if the indices are still in range.
+    private func cell(at slot: WindowSlot) -> (window: ExternalWindow?, container: LayoutContainer?)? {
+        if let columnIndex = slot.columnIndex,
+           columns.indices.contains(columnIndex),
+           columns[columnIndex].windows.indices.contains(slot.windowIndex) {
+            let cell = columns[columnIndex].windows[slot.windowIndex]
+            return (cell.window, cell.nestedContainer)
+        }
+        if let rowIndex = slot.rowIndex,
+           rows.indices.contains(rowIndex),
+           rows[rowIndex].windows.indices.contains(slot.windowIndex) {
+            let cell = rows[rowIndex].windows[slot.windowIndex]
+            return (cell.window, cell.nestedContainer)
+        }
+        return nil
+    }
+
+    /// Trade the windows occupying two slots, anywhere in the layout.
+    ///
+    /// Both slots keep their sizes and their ids — only the windows change
+    /// places — so dragging one pane onto another reads as the two apps trading
+    /// spots rather than the layout being rebuilt around them. Works between
+    /// two panes of one split, between panes of different splits, and between a
+    /// split pane and a plain cell.
+    func swapWindows(_ first: WindowSlot, _ second: WindowSlot) {
+        guard first != second,
+              let firstWindow = window(at: first),
+              let secondWindow = window(at: second)
+        else { return }
+
+        setWindow(secondWindow, at: first)
+        setWindow(firstWindow, at: second)
+        applyLayoutIfActive()
+    }
+
+    /// Pull a window out of the split it lives in and hand it back.
+    ///
+    /// The cell collapses to a plain window when one pane is left, and is
+    /// removed outright when none is — so a split never lingers as an empty
+    /// box after its contents are dragged elsewhere. Returns nil for a slot
+    /// that doesn't name a pane.
+    @discardableResult
+    private func extractNestedWindow(at slot: WindowSlot) -> ExternalWindow? {
+        guard let nestedIndex = slot.nestedIndex,
+              var container = nestedContainer(
+                  columnIndex: slot.columnIndex,
+                  rowIndex: slot.rowIndex,
+                  windowIndex: slot.windowIndex
+              ),
+              container.children.indices.contains(nestedIndex)
+        else { return nil }
+
+        let extracted = container.children.remove(at: nestedIndex).window
+        container.normalizeProportions()
+
+        if container.children.isEmpty {
+            removeCell(at: slot)
+        } else if container.children.count == 1 {
+            collapseCellToWindow(container.children[0].window, at: slot)
+        } else {
+            setNestedContainer(
+                container,
+                columnIndex: slot.columnIndex,
+                rowIndex: slot.rowIndex,
+                windowIndex: slot.windowIndex
+            )
+        }
+
+        return extracted
+    }
+
+    /// Take the window at a slot out of the layout and hand it back, ready to be
+    /// placed elsewhere. Panes come out of their split; a plain cell is removed
+    /// from its column or row.
+    func takeWindow(at slot: WindowSlot) -> ExternalWindow? {
+        if slot.nestedIndex != nil {
+            return extractNestedWindow(at: slot)
+        }
+        guard let window = window(at: slot) else { return nil }
+        removeCell(at: slot)
+        return window
+    }
+
+    /// Move a window out of `source` and into the split held by the cell at
+    /// `destination`.
+    ///
+    /// The destination is re-resolved by cell id after the source is vacated:
+    /// taking a cell out of the same column shifts everything below it up, so
+    /// the index captured when the drag started can point at the wrong cell by
+    /// the time the window is ready to land.
+    func moveWindow(from source: WindowSlot, intoSplitAt destination: WindowSlot) {
+        guard let destinationId = cellId(at: destination),
+              cellId(at: source) != destinationId,
+              let window = takeWindow(at: source),
+              let landing = slot(ofCell: destinationId)
+        else { return }
+
+        if let columnIndex = landing.columnIndex {
+            addWindowToColumnNested(
+                columnIndex: columnIndex, windowIndex: landing.windowIndex, window: window
+            )
+        } else if let rowIndex = landing.rowIndex {
+            addWindowToRowNested(
+                rowIndex: rowIndex, windowIndex: landing.windowIndex, window: window
+            )
+        }
+    }
+
+    /// The id of the cell a slot addresses — stable across the reindexing that
+    /// removing another cell causes.
+    private func cellId(at slot: WindowSlot) -> UUID? {
+        if let columnIndex = slot.columnIndex,
+           columns.indices.contains(columnIndex),
+           columns[columnIndex].windows.indices.contains(slot.windowIndex) {
+            return columns[columnIndex].windows[slot.windowIndex].id
+        }
+        if let rowIndex = slot.rowIndex,
+           rows.indices.contains(rowIndex),
+           rows[rowIndex].windows.indices.contains(slot.windowIndex) {
+            return rows[rowIndex].windows[slot.windowIndex].id
+        }
+        return nil
+    }
+
+    /// Where a cell currently sits, looked up by id.
+    private func slot(ofCell id: UUID) -> WindowSlot? {
+        for (columnIndex, column) in columns.enumerated() {
+            if let windowIndex = column.windows.firstIndex(where: { $0.id == id }) {
+                return WindowSlot(columnIndex: columnIndex, rowIndex: nil, windowIndex: windowIndex, nestedIndex: nil)
+            }
+        }
+        for (rowIndex, row) in rows.enumerated() {
+            if let windowIndex = row.windows.firstIndex(where: { $0.id == id }) {
+                return WindowSlot(columnIndex: nil, rowIndex: rowIndex, windowIndex: windowIndex, nestedIndex: nil)
+            }
+        }
+        return nil
+    }
+
+    /// Replace a cell's split with a single window, keeping the cell's id and
+    /// share of the column or row.
+    private func collapseCellToWindow(_ window: ExternalWindow, at slot: WindowSlot) {
+        if let columnIndex = slot.columnIndex, columns.indices.contains(columnIndex),
+           columns[columnIndex].windows.indices.contains(slot.windowIndex) {
+            var updated = columns
+            let cell = updated[columnIndex].windows[slot.windowIndex]
+            updated[columnIndex].windows[slot.windowIndex] = ColumnWindow(
+                id: cell.id, window: window, heightProportion: cell.heightProportion
+            )
+            columns = updated
+        } else if let rowIndex = slot.rowIndex, rows.indices.contains(rowIndex),
+                  rows[rowIndex].windows.indices.contains(slot.windowIndex) {
+            var updated = rows
+            let cell = updated[rowIndex].windows[slot.windowIndex]
+            updated[rowIndex].windows[slot.windowIndex] = RowWindow(
+                id: cell.id, window: window, widthProportion: cell.widthProportion
+            )
+            rows = updated
+        }
+    }
+
+    /// Drop a cell from its column or row and re-share the space between what
+    /// is left. The column or row itself survives even if it empties — the user
+    /// is mid-drag and an empty column is a legitimate drop target.
+    private func removeCell(at slot: WindowSlot) {
+        if let columnIndex = slot.columnIndex, columns.indices.contains(columnIndex),
+           columns[columnIndex].windows.indices.contains(slot.windowIndex) {
+            var updated = columns
+            updated[columnIndex].windows.remove(at: slot.windowIndex)
+            let count = updated[columnIndex].windows.count
+            if count > 0 {
+                for i in 0..<count {
+                    updated[columnIndex].windows[i].heightProportion = 1.0 / CGFloat(count)
+                }
+            }
+            columns = updated
+        } else if let rowIndex = slot.rowIndex, rows.indices.contains(rowIndex),
+                  rows[rowIndex].windows.indices.contains(slot.windowIndex) {
+            var updated = rows
+            updated[rowIndex].windows.remove(at: slot.windowIndex)
+            let count = updated[rowIndex].windows.count
+            if count > 0 {
+                for i in 0..<count {
+                    updated[rowIndex].windows[i].widthProportion = 1.0 / CGFloat(count)
+                }
+            }
+            rows = updated
+        }
+    }
+
     // MARK: - Nested Container Access
 
     /// Read the split held by a cell, addressed the same way in either mode.
@@ -2058,29 +2353,6 @@ class WindowManager: ObservableObject {
             )
             rows = updated
         }
-    }
-
-    /// Trade the windows occupying two panes of a split.
-    ///
-    /// The panes keep their sizes — only the windows change sides, which is what
-    /// dragging one onto the other looks like it should do. Each node keeps its
-    /// own id too, so SwiftUI sees the panes staying put rather than being
-    /// rebuilt.
-    func swapNestedWindows(columnIndex: Int?, rowIndex: Int?, windowIndex: Int, from: Int, to: Int) {
-        guard from != to,
-              var container = nestedContainer(
-                  columnIndex: columnIndex, rowIndex: rowIndex, windowIndex: windowIndex
-              ),
-              container.children.indices.contains(from),
-              container.children.indices.contains(to)
-        else { return }
-
-        let carried = container.children[from].window
-        container.children[from].window = container.children[to].window
-        container.children[to].window = carried
-
-        setNestedContainer(container, columnIndex: columnIndex, rowIndex: rowIndex, windowIndex: windowIndex)
-        applyLayoutIfActive()
     }
 
     /// Resize a divider inside a nested container in a column.
