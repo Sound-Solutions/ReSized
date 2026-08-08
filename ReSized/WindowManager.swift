@@ -2141,7 +2141,7 @@ class WindowManager: ObservableObject {
         guard let currentFrame = ExternalWindow.getFrame(from: element) else { return }
 
         // Find the window in our layout and check delta
-        var changedWindow: (primaryIndex: Int, winIndex: Int, delta: FrameDelta)?
+        var changedWindow: (cellId: UUID, primaryIndex: Int, winIndex: Int, delta: FrameDelta)?
 
         switch layout.layoutMode {
         case .columns:
@@ -2152,7 +2152,7 @@ class WindowManager: ObservableObject {
                         guard let expected = layout.expectedFrames[colWindow.id] else { continue }
                         let expectedAX = convertFrameToAXCoordinates(expected)
                         if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
-                            changedWindow = (colIndex, winIndex, delta)
+                            changedWindow = (colWindow.id, colIndex, winIndex, delta)
                         }
                         break
                     }
@@ -2165,7 +2165,7 @@ class WindowManager: ObservableObject {
                         guard let expected = layout.expectedFrames[rowWindow.id] else { continue }
                         let expectedAX = convertFrameToAXCoordinates(expected)
                         if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
-                            changedWindow = (rowIndex, winIndex, delta)
+                            changedWindow = (rowWindow.id, rowIndex, winIndex, delta)
                         }
                         break
                     }
@@ -2183,6 +2183,15 @@ class WindowManager: ObservableObject {
                 handleRowWindowResize(in: layout, rowIndex: change.primaryIndex,
                                       windowIndex: change.winIndex, delta: change.delta)
             }
+
+            // Re-baseline this window right now, against where it actually is.
+            //
+            // handleWindowResize ADDS the delta to the current proportion, and the
+            // reflow that refreshes every expected frame is debounced — so without
+            // this, every event during a drag measures from the same stale baseline
+            // and adds it again: 10px, then 20px, then 30px. The window ends up
+            // nowhere near where the mouse was released.
+            layout.expectedFrames[change.cellId] = convertFrameFromAXCoordinates(currentFrame)
 
             scheduleReflow(for: layout)
         }
