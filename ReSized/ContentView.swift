@@ -199,6 +199,7 @@ struct ContentView: View {
         .onAppear {
             hasAccessibilityPermission = AccessibilityHelper.checkAccessibilityPermissions()
 
+            windowManager.isConfigWindowVisible = true
             windowManager.refreshMonitors()
 
             // Skip directly to editing mode for the monitor at mouse location
@@ -213,11 +214,22 @@ struct ContentView: View {
         }
         .onDisappear {
             permissionTimer?.invalidate()
+            // Takes the highlight ring down with the window
+            windowManager.isConfigWindowVisible = false
         }
         // Coming back from System Settings reactivates the app — cheaper and far
         // more responsive than waiting for the next poll tick.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshPermissionState()
+        }
+        // Belt and braces for the highlight ring. onDisappear is not dependable
+        // for a SwiftUI Window scene closed with the red X on macOS, and leaving
+        // a borderless always-on-top rectangle stranded on the desktop is a much
+        // worse failure than hiding it once too often.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { note in
+            guard let closing = note.object as? NSWindow,
+                  !(closing is MonitorHighlightWindow) else { return }
+            windowManager.isConfigWindowVisible = false
         }
     }
 

@@ -560,10 +560,9 @@ class WindowManager: ObservableObject {
         // Update container bounds in case screen changed
         currentLayout?.updateBounds(from: monitor.frame)
 
-        // Show highlight ring on the selected monitor (unless actively managing)
-        if currentLayout?.isActive != true {
-            MonitorHighlightWindow.show(on: monitor.screen)
-        }
+        // Show highlight ring on the selected monitor (unless actively managing,
+        // or the config window isn't even open)
+        updateHighlight()
 
         // Scan windows when switching tabs (if layout is empty and not actively managing)
         if AccessibilityHelper.checkAccessibilityPermissions() && currentLayout?.isActive != true {
@@ -577,13 +576,28 @@ class WindowManager: ObservableObject {
         objectWillChange.send()
     }
 
-    /// Update the highlight ring visibility based on state
+    /// Whether the config window is currently on screen.
+    ///
+    /// The highlight ring is a borderless, always-on-top window of our own, so it
+    /// has to be tied to the lifetime of the window it belongs to. Closing the
+    /// config window used to leave a red rectangle floating over the desktop with
+    /// no way to dismiss it short of starting management on that monitor.
+    var isConfigWindowVisible = false {
+        didSet { updateHighlight() }
+    }
+
+    /// Update the highlight ring visibility based on state.
+    ///
+    /// Single gate for the ring — every show/hide goes through here so the rules
+    /// can't drift apart between call sites.
     func updateHighlight() {
-        if let monitor = selectedMonitor, currentLayout?.isActive != true {
-            MonitorHighlightWindow.show(on: monitor.screen)
-        } else {
+        guard isConfigWindowVisible,
+              let monitor = selectedMonitor,
+              currentLayout?.isActive != true else {
             MonitorHighlightWindow.hide()
+            return
         }
+        MonitorHighlightWindow.show(on: monitor.screen)
     }
 
     private func updateContainerBounds() {
@@ -2244,10 +2258,10 @@ class WindowManager: ObservableObject {
         layout.expectedFrames.removeAll()
         stopMaintenanceTimerIfIdle()
 
-        // Show highlight again when not actively managing
-        if let monitor = selectedMonitor {
-            MonitorHighlightWindow.show(on: monitor.screen)
-        }
+        // Show highlight again when not actively managing — but only if the
+        // config window is actually open. Stopping from the menu bar with no
+        // window on screen should not paint a ring on the desktop.
+        updateHighlight()
 
         // Notify menu bar
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
