@@ -390,6 +390,7 @@ class WindowObserver {
             guard let observer = observers[entry.pid] else { continue }
             AXObserverRemoveNotification(observer, entry.element, kAXMovedNotification as CFString)
             AXObserverRemoveNotification(observer, entry.element, kAXResizedNotification as CFString)
+            AXObserverRemoveNotification(observer, entry.element, kAXUIElementDestroyedNotification as CFString)
         }
         observedElements.removeAll { !isWanted($0.element) }
 
@@ -401,8 +402,11 @@ class WindowObserver {
 
             let addMoved = AXObserverAddNotification(observer, window.axElement, kAXMovedNotification as CFString, refcon)
             let addResized = AXObserverAddNotification(observer, window.axElement, kAXResizedNotification as CFString, refcon)
+            // Destroyed fires when the window closes, so the layout can reflow
+            // at once instead of waiting for the maintenance sweep to notice.
+            let addDestroyed = AXObserverAddNotification(observer, window.axElement, kAXUIElementDestroyedNotification as CFString, refcon)
 
-            if addMoved == .success || addResized == .success {
+            if addMoved == .success || addResized == .success || addDestroyed == .success {
                 observedElements.append((window.axElement, window.ownerPID))
             }
         }
@@ -463,6 +467,7 @@ class WindowObserver {
             for (element, elementPid) in observedElements where elementPid == pid {
                 AXObserverRemoveNotification(observer, element, kAXMovedNotification as CFString)
                 AXObserverRemoveNotification(observer, element, kAXResizedNotification as CFString)
+                AXObserverRemoveNotification(observer, element, kAXUIElementDestroyedNotification as CFString)
             }
 
             CFRunLoopRemoveSource(

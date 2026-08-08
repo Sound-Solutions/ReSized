@@ -54,9 +54,14 @@ final class SeamOverlayView: NSView {
     var seams: [DesktopSeam] = [] {
         didSet {
             needsDisplay = true
-            window?.invalidateCursorRects(for: self)
         }
     }
+
+    /// Whether a screen point on a seam is actually showing this layout, and
+    /// not some unmanaged window sitting on top of it. The panel floats above
+    /// every ordinary window, so without this check the seams draw, grab and
+    /// swallow clicks straight through whatever is covering the tiled windows.
+    var isPointExposed: ((CGPoint) -> Bool)?
 
     /// Called continuously while a seam is dragged, with the drag so far as a
     /// fraction of the seam's track.
@@ -89,20 +94,17 @@ final class SeamOverlayView: NSView {
     }
 
     private func seamRect(at point: CGPoint) -> Int? {
-        localSeamRects().firstIndex { $0.contains(point) }
+        guard let index = localSeamRects().firstIndex(where: { $0.contains(point) }) else { return nil }
+        // The occlusion query is only paid for points already on a seam strip.
+        if let isPointExposed,
+           !isPointExposed(CGPoint(x: point.x + screenOrigin.x, y: point.y + screenOrigin.y)) {
+            return nil
+        }
+        return index
     }
 
     private func localSeamRects() -> [CGRect] {
         seams.map { $0.rect.offsetBy(dx: -screenOrigin.x, dy: -screenOrigin.y) }
-    }
-
-    // MARK: Cursors
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        for (index, rect) in localSeamRects().enumerated() {
-            addCursorRect(rect, cursor: seams[index].isVertical ? .resizeLeftRight : .resizeUpDown)
-        }
     }
 
     // MARK: Drawing
@@ -150,16 +152,27 @@ final class SeamOverlayView: NSView {
     override func mouseMoved(with event: NSEvent) { updateHover(event) }
 
     override func mouseExited(with event: NSEvent) {
-        hoveredIndex = nil
-        needsDisplay = true
+        setHover(nil)
     }
 
     private func updateHover(_ event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        let index = seamRect(at: point)
+        setHover(seamRect(at: point))
+    }
+
+    /// Hover state and the cursor move together, both gated by the same
+    /// exposure check. This used to be cursor rects covering every seam, which
+    /// AppKit applies with no idea that another app's window is in the way —
+    /// so the resize cursor showed through anything floating over the layout.
+    private func setHover(_ index: Int?) {
         guard index != hoveredIndex else { return }
         hoveredIndex = index
         needsDisplay = true
+        if let index, index < seams.count {
+            (seams[index].isVertical ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).set()
+        } else if activeSeam == nil {
+            NSCursor.arrow.set()
+        }
     }
 
     override func mouseDown(with event: NSEvent) {

@@ -2255,6 +2255,10 @@ class WindowManager {
             overlay.seamView?.onDrag = { [weak self] seam, translation in
                 self?.dragDesktopSeam(seam, proportionalTranslation: translation)
             }
+            overlay.seamView?.isPointExposed = { [weak self, weak layout] point in
+                guard let self, let layout else { return true }
+                return self.isSeamPointExposed(point, in: layout)
+            }
             overlay.orderFront(nil)
             layout.seamOverlay = overlay
         }
@@ -2265,6 +2269,66 @@ class WindowManager {
     func hideSeamOverlay(for layout: MonitorLayout) {
         layout.seamOverlay?.orderOut(nil)
         layout.seamOverlay = nil
+    }
+
+    /// Whether a screen point over a live layout is actually showing that
+    /// layout, or is covered by some unmanaged window floating above it.
+    ///
+    /// Asked by the seam overlay before it draws, changes the cursor, or takes
+    /// a click — the panel sits above every ordinary window, so this is the
+    /// only thing standing between the seams and rendering straight through a
+    /// window that happens to be on top of the tiled ones.
+    private func isSeamPointExposed(_ screenPoint: CGPoint, in layout: MonitorLayout) -> Bool {
+        guard let entries = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return true }
+
+        let managedIDs = Set(getAllManagedWindows(in: layout).compactMap(\.windowID))
+        guard !managedIDs.isEmpty else { return true }
+
+        // Our own chrome never occludes: the seam overlays themselves and the
+        // monitor highlight ring. The config window is deliberately not in this
+        // set — it is a real window, and seams should not draw through it.
+        let ownChrome = Set(NSApp.windows.compactMap { window -> CGWindowID? in
+            guard window is SeamOverlayWindow || window is MonitorHighlightWindow,
+                  window.windowNumber > 0 else { return nil }
+            return CGWindowID(window.windowNumber)
+        })
+
+        // CGWindowList bounds are in global top-left coordinates; NSScreen's
+        // are bottom-left. Both share the primary display's origin.
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let cgPoint = CGPoint(x: screenPoint.x, y: primaryHeight - screenPoint.y)
+
+        // The entries come front-to-back. The seam is exposed unless the
+        // topmost window under the point is an unmanaged one sitting in front
+        // of the layout — an unmanaged window *behind* every managed one is
+        // just the usual view through the gap between tiles, and must not make
+        // the seam ungrabbable.
+        var unmanagedHit = false
+        for entry in entries {
+            guard let number = (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  !ownChrome.contains(number),
+                  (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let layer = (entry[kCGWindowLayer as String] as? NSNumber)?.intValue,
+                  // Below the cursor's own window and the screen-saver shields,
+                  // which contain every point and would occlude everything.
+                  layer < Int(CGWindowLevelForKey(.screenSaverWindow))
+            else { continue }
+
+            if unmanagedHit {
+                if managedIDs.contains(number) { return false }
+                continue
+            }
+
+            guard let boundsDict = entry[kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary),
+                  bounds.contains(cgPoint) else { continue }
+
+            if managedIDs.contains(number) { return true }
+            unmanagedHit = true
+        }
+        return true
     }
 
     /// Union that tolerates a missing first term, for folding a list of frames.
@@ -2982,8 +3046,15 @@ class WindowManager {
         // Drop notifications caused by our own writes — see suppressEventsUntil.
         guard Date() >= layout.suppressEventsUntil else { return }
 
-        // Find which window changed and compare to expected
-        guard let currentFrame = ExternalWindow.getFrame(from: element) else { return }
+        // Find which window changed and compare to expected. No frame usually
+        // means the window just closed — the destroyed notification lands here
+        // — so run the closed-window sweep now rather than leaving the hole on
+        // screen until the maintenance timer next fires. The sweep re-checks
+        // with the window server, so a mere AX timeout removes nothing.
+        guard let currentFrame = ExternalWindow.getFrame(from: element) else {
+            checkForClosedWindows(in: layout)
+            return
+        }
 
         guard let found = locate(element: element, in: layout),
               let expected = layout.expectedFrames[found.frameKey],
@@ -3414,13 +3485,29 @@ class WindowManager {
             removeClosedCell(cellId, in: layout)
         }
         refreshAvailableWindows()
+
+        // The survivors inherit the freed space. Pruning used to stop at the
+        // model, so closing a window left a hole on screen until something else
+        // happened to re-apply the layout.
+        applyLayoutAndUpdateExpected(for: layout)
     }
 
-    /// A window counts as gone only when its frame is unreadable AND the owning
-    /// process is dead — AX calls also time out during system sleep, and dropping
-    /// windows then is what used to empty layouts overnight.
+    /// A window counts as gone only when its frame is unreadable AND either the
+    /// owning process is dead or the window server no longer knows the window.
+    ///
+    /// The process check alone missed the everyday case — closing one window of
+    /// an app that keeps running. The extra question is asked of the window
+    /// server rather than the app deliberately: AX calls time out during system
+    /// sleep and app hangs, and treating a timeout as "closed" is what used to
+    /// empty layouts overnight. The server still lists the window through both.
     private func isWindowGone(_ window: ExternalWindow) -> Bool {
-        ExternalWindow.getFrame(from: window.axElement) == nil && kill(window.ownerPID, 0) != 0
+        guard ExternalWindow.getFrame(from: window.axElement) == nil else { return false }
+        if kill(window.ownerPID, 0) != 0 { return true }
+
+        guard let windowID = window.windowID,
+              let descriptions = CGWindowListCreateDescriptionFromArray([windowID] as CFArray) as? [[String: Any]]
+        else { return false }
+        return descriptions.isEmpty
     }
 
     /// Every top-level cell in a layout, paired with its window if it holds one.
