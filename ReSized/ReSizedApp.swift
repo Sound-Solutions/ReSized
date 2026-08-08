@@ -301,11 +301,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // NSApp.activate is asynchronous, so a posted key event could land before
         // we were actually frontmost — opening whichever app still had focus and
         // its settings window instead of ours.
-        if #available(macOS 14, *) {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        } else {
-            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-        }
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 
     @objc private func updateMenuState() {

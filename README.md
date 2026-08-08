@@ -18,7 +18,7 @@ ReSized is a lightweight macOS window manager that lets you define custom layout
 
 ## Requirements
 
-- macOS 13.0 (Ventura) or later
+- macOS 14.0 (Sonoma) or later
 - Accessibility permissions (required to manage windows)
 
 ## Installation
