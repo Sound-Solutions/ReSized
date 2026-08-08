@@ -12,5 +12,5 @@
     <choice id="app" title="ReSized" description="Install ReSized to /Applications" visible="false">
         <pkg-ref id="com.resized.ReSized"/>
     </choice>
-    <pkg-ref id="com.resized.ReSized" version="1.0">ReSized-component.pkg</pkg-ref>
+    <pkg-ref id="com.resized.ReSized" version="1.1">ReSized-component.pkg</pkg-ref>
 </installer-gui-script>
