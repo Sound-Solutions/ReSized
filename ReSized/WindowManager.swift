@@ -3509,6 +3509,13 @@ class WindowManager {
     }
 
     private func checkForClosedWindows(in layout: MonitorLayout) {
+        // The window server "forgets" the whole session's windows while the
+        // screen is locked or the session is off-console — one blackout
+        // reported five live Terminal windows gone in the same second and the
+        // sweep dismantled their layout. Believe nothing it says until it can
+        // at least see a window we own.
+        guard windowServerIsTrustworthy() else { return }
+
         // Collect first, mutate afterwards. Removing during the walk invalidates
         // the indices the remaining iterations are about to use, so two windows
         // disappearing at once could delete the wrong column entirely.
@@ -3544,6 +3551,41 @@ class WindowManager {
         // model, so closing a window left a hole on screen until something else
         // happened to re-apply the layout.
         applyLayoutAndUpdateExpected(for: layout)
+    }
+
+    /// Whether the window server's answers can be believed right now.
+    ///
+    /// Locked or off-console sessions get empty answers for every window in
+    /// them — indistinguishable, window by window, from the window genuinely
+    /// being closed. Two checks: the session says it is on console and
+    /// unlocked, and the server can describe one of our own overlay panels
+    /// (which we know exists). If it can't see ours, it can't be trusted
+    /// about anyone else's.
+    private func windowServerIsTrustworthy() -> Bool {
+        if let session = CGSessionCopyCurrentDictionary() as? [String: Any] {
+            if let onConsole = session[kCGSessionOnConsoleKey as String] as? Bool, !onConsole {
+                AccessibilityHelper.logDebug("sweep skipped: session off console")
+                return false
+            }
+            if let locked = session["CGSSessionScreenIsLocked"] as? Bool, locked {
+                AccessibilityHelper.logDebug("sweep skipped: screen locked")
+                return false
+            }
+        }
+
+        guard let sentinel = monitorLayouts.values
+            .first(where: { $0.isActive })?.seamOverlay?.windowNumber,
+            sentinel > 0
+        else { return true }
+
+        let descriptions = CGWindowListCreateDescriptionFromArray(
+            [CGWindowID(sentinel)] as CFArray
+        ) as? [[String: Any]]
+        if descriptions?.isEmpty ?? true {
+            AccessibilityHelper.logDebug("sweep skipped: window server cannot see our own overlay")
+            return false
+        }
+        return true
     }
 
     /// A window counts as gone only when its frame is unreadable AND either the
