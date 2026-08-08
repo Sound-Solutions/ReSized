@@ -28,29 +28,49 @@ struct AccessibilityHelper {
         }
     }
 
-    /// Check if an AXUIElement is still valid (window/app hasn't closed)
-    static func isElementValid(_ element: AXUIElement) -> Bool {
-        // Try to get the role - if this fails, the element is invalid
-        var roleValue: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue)
-        return result == .success
-    }
-
-    /// Log to debug.txt for troubleshooting
+    /// Log an AX diagnostic. Always goes to the unified log (Console.app, or
+    /// `log stream --predicate 'subsystem == "com.resized"'`), and additionally to
+    /// debug.txt in the project root for DEBUG builds.
     static func logDebug(_ message: String) {
-        let debugPath = FileManager.default.currentDirectoryPath + "/debug.txt"
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        let line = "[\(timestamp)] \(message)\n"
+        axLogger.debug("\(message, privacy: .public)")
+        #if DEBUG
+        DebugFileLog.append(message)
+        #endif
+    }
+}
 
-        if let handle = FileHandle(forWritingAtPath: debugPath) {
-            handle.seekToEndOfFile()
-            handle.write(line.data(using: .utf8)!)
-            handle.closeFile()
-        } else {
-            try? line.write(toFile: debugPath, atomically: true, encoding: .utf8)
+#if DEBUG
+/// Appends to debug.txt beside the .xcodeproj.
+///
+/// The previous implementation resolved the path against the process working
+/// directory, which is "/" for a bundled app — so every write failed, silently,
+/// because the failure was swallowed by `try?`. #filePath is resolved at compile
+/// time and points at the real source tree.
+private enum DebugFileLog {
+    private static let queue = DispatchQueue(label: "com.resized.debuglog")
+    private static let timestamps = ISO8601DateFormatter()
+
+    /// #filePath is <root>/ReSized/AccessibilityHelper.swift
+    private static let url = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("debug.txt")
+
+    static func append(_ message: String) {
+        let line = "[\(timestamps.string(from: Date()))] \(message)\n"
+        queue.async {
+            guard let data = line.data(using: .utf8) else { return }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: url)
+            }
         }
     }
 }
+#endif
 
 /// Represents an external window that can be controlled
 class ExternalWindow: Identifiable, ObservableObject, Equatable {
@@ -63,15 +83,21 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
     @Published var title: String
     @Published var isMinimized: Bool = false
 
-    /// Track if this window's AXUIElement is still valid
-    var isValid: Bool {
-        AccessibilityHelper.isElementValid(axElement)
-    }
+    /// Timeout for every AX message sent to this window. Set once per element at
+    /// construction rather than before each accessor — it is itself an IPC call.
+    static let messagingTimeout: Float = 0.1
+
+    /// A window's min/max size are fixed in practice, and each read is a synchronous
+    /// cross-process call. constrainFrame() reads both for every window on every
+    /// layout apply, so resolve them lazily and keep them.
+    private var cachedMinSize: CGSize?
+    private var cachedMaxSize: CGSize?
 
     init(axElement: AXUIElement, pid: pid_t, ownerName: String) {
         self.axElement = axElement
         self.ownerPID = pid
         self.ownerName = ownerName
+        AXUIElementSetMessagingTimeout(axElement, Self.messagingTimeout)
         self.frame = Self.getFrame(from: axElement) ?? .zero
         self.title = Self.getTitle(from: axElement) ?? "Untitled"
     }
@@ -151,60 +177,50 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
         return titleValue as? String
     }
 
-    func refreshFrame() {
-        if let newFrame = Self.getFrame(from: axElement) {
-            DispatchQueue.main.async {
-                self.frame = newFrame
-            }
-        }
-    }
-
-    func refreshTitle() {
-        if let newTitle = Self.getTitle(from: axElement) {
-            DispatchQueue.main.async {
-                self.title = newTitle
-            }
-        }
-    }
-
     // MARK: - Window Manipulation
 
+    @discardableResult
     func setFrame(_ newFrame: CGRect) -> Bool {
-        // Check if element is still valid before attempting to set frame
-        guard isValid else {
-            return false
-        }
-
-        // Set a short timeout to prevent hanging on dead windows
-        AXUIElementSetMessagingTimeout(axElement, 0.1)
+        // No isValid pre-check: a dead element simply returns .invalidUIElement
+        // from the sets below, so probing first only costs an extra round trip.
 
         // Convert the frame to AX coordinates
         // NSScreen: origin is bottom-left, Y=0 at bottom, Y increases upward
         // AX/Quartz: origin is top-left, Y=0 at top, Y increases downward
         let axFrame = convertFrameToAXCoordinates(newFrame)
 
-        // Set position first (top-left in AX coords), then size
         var pos = axFrame.origin
-        guard let positionValue = AXValueCreate(.cgPoint, &pos) else { return false }
-        let posResult = AXUIElementSetAttributeValue(axElement, kAXPositionAttribute as CFString, positionValue)
-        let positionSet = posResult == .success
-
         var sz = axFrame.size
-        guard let sizeValue = AXValueCreate(.cgSize, &sz) else { return false }
+        guard let positionValue = AXValueCreate(.cgPoint, &pos),
+              let sizeValue = AXValueCreate(.cgSize, &sz) else { return false }
+
+        // Position, then size, then position again. The window server clamps a
+        // requested size against whichever display the window currently occupies,
+        // so a single position+size pass lands short whenever a window is moving
+        // to a larger display or growing past the bounds of its current screen.
+        // The second position call re-seats it once the size has been accepted.
+        let firstPos = AXUIElementSetAttributeValue(axElement, kAXPositionAttribute as CFString, positionValue)
         let sizeResult = AXUIElementSetAttributeValue(axElement, kAXSizeAttribute as CFString, sizeValue)
+        let secondPos = AXUIElementSetAttributeValue(axElement, kAXPositionAttribute as CFString, positionValue)
+
+        let positionSet = firstPos == .success || secondPos == .success
         let sizeSet = sizeResult == .success
 
         // Log failures for debugging (but not invalidUIElement - that's expected when windows close)
-        if !positionSet && posResult != .invalidUIElement {
-            AccessibilityHelper.logDebug("setFrame position failed for \(ownerName): \(Self.describeAXError(posResult))")
+        if !positionSet && firstPos != .invalidUIElement {
+            AccessibilityHelper.logDebug("setFrame position failed for \(ownerName): \(Self.describeAXError(firstPos))")
         }
         if !sizeSet && sizeResult != .invalidUIElement {
             AccessibilityHelper.logDebug("setFrame size failed for \(ownerName): \(Self.describeAXError(sizeResult))")
         }
 
         if positionSet || sizeSet {
-            DispatchQueue.main.async {
-                self.frame = newFrame
+            // setFrame runs on the main thread from the layout paths; only hop when
+            // that is not the case, so a drag does not queue a block per window.
+            if Thread.isMainThread {
+                frame = newFrame
+            } else {
+                DispatchQueue.main.async { self.frame = newFrame }
             }
         }
 
@@ -227,18 +243,6 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
         return CGRect(x: frame.origin.x, y: axY, width: frame.width, height: frame.height)
     }
 
-    func setPosition(_ position: CGPoint) -> Bool {
-        var pos = position
-        guard let positionValue = AXValueCreate(.cgPoint, &pos) else { return false }
-        return AXUIElementSetAttributeValue(axElement, kAXPositionAttribute as CFString, positionValue) == .success
-    }
-
-    func setSize(_ size: CGSize) -> Bool {
-        var sz = size
-        guard let sizeValue = AXValueCreate(.cgSize, &sz) else { return false }
-        return AXUIElementSetAttributeValue(axElement, kAXSizeAttribute as CFString, sizeValue) == .success
-    }
-
     func raise() {
         AXUIElementSetAttributeValue(axElement, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementPerformAction(axElement, kAXRaiseAction as CFString)
@@ -246,26 +250,33 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
 
     // MARK: - Size Constraints
 
-    var minSize: CGSize {
-        AXUIElementSetMessagingTimeout(axElement, 0.1)
+    /// Read a size-valued AX attribute. Returns nil when the attribute is absent or
+    /// is not actually an AXValue — most windows do not publish size constraints,
+    /// and an unchecked cast on the reply is a crash waiting for the one that does
+    /// something unusual.
+    private func sizeAttribute(_ attribute: String) -> CGSize? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axElement, "AXMinimumSize" as CFString, &value) == .success else {
-            return CGSize(width: 100, height: 100)
+        guard AXUIElementCopyAttributeValue(axElement, attribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXValueGetTypeID() else {
+            return nil
         }
         var size = CGSize.zero
-        AXValueGetValue(value as! AXValue, .cgSize, &size)
+        guard AXValueGetValue(value as! AXValue, .cgSize, &size) else { return nil }
         return size
     }
 
+    var minSize: CGSize {
+        if let cachedMinSize { return cachedMinSize }
+        let resolved = sizeAttribute("AXMinimumSize") ?? CGSize(width: 100, height: 100)
+        cachedMinSize = resolved
+        return resolved
+    }
+
     var maxSize: CGSize {
-        AXUIElementSetMessagingTimeout(axElement, 0.1)
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axElement, "AXMaximumSize" as CFString, &value) == .success else {
-            return CGSize(width: 10000, height: 10000)
-        }
-        var size = CGSize.zero
-        AXValueGetValue(value as! AXValue, .cgSize, &size)
-        return size
+        if let cachedMaxSize { return cachedMaxSize }
+        let resolved = sizeAttribute("AXMaximumSize") ?? CGSize(width: 10000, height: 10000)
+        cachedMaxSize = resolved
+        return resolved
     }
 }
 
@@ -415,21 +426,6 @@ class WindowDiscovery {
         return windows
     }
 
-    /// Get the frontmost window
-    static func getFrontmostWindow() -> ExternalWindow? {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
-
-        let pid = frontApp.processIdentifier
-        let appElement = AXUIElementCreateApplication(pid)
-
-        var focusedWindow: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success else {
-            return nil
-        }
-
-        let appName = frontApp.localizedName ?? "Unknown"
-        return ExternalWindow(axElement: focusedWindow as! AXUIElement, pid: pid, ownerName: appName)
-    }
 }
 
 // MARK: - App Launcher Helper
@@ -486,21 +482,6 @@ struct AppLauncher {
         // Wait briefly for the launch to complete
         _ = semaphore.wait(timeout: .now() + 2.0)
         return success
-    }
-
-    /// Check if an app is currently running
-    static func isAppRunning(bundleId: String) -> Bool {
-        NSWorkspace.shared.runningApplications.contains {
-            $0.bundleIdentifier == bundleId
-        }
-    }
-
-    /// Check if an app has any windows
-    static func hasWindows(bundleId: String) -> Bool {
-        let windows = WindowDiscovery.discoverAllWindows()
-        return windows.contains { window in
-            getBundleIdentifier(for: window.ownerName) == bundleId
-        }
     }
 
     /// Get all installed applications

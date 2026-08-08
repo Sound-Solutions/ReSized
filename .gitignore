@@ -16,3 +16,6 @@ Pods/
 # Swift Package Manager
 .swiftpm/
 Package.resolved
+
+# Debug log written by AccessibilityHelper.logDebug in DEBUG builds
+debug.txt

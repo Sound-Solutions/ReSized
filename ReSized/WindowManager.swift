@@ -1,6 +1,5 @@
 import SwiftUI
 import Combine
-import CoreVideo
 import AppKit
 
 // MARK: - Monitor Highlight Overlay
@@ -332,11 +331,16 @@ class MonitorLayout: ObservableObject {
     @Published var containerBounds: CGRect = .zero
     @Published var isActive: Bool = false
 
-    var displayLink: CVDisplayLink?
     var windowObserver: WindowObserver?
     var expectedFrames: [UUID: CGRect] = [:]
-    var framesSinceApply: Int = 0
-    var isApplyingLayout = false
+
+    /// Move/resize notifications caused by our own layout writes arrive on the run
+    /// loop *after* the write returns, so a synchronous "am I applying" flag never
+    /// sees them and the app reacts to itself. Ignore window events until this
+    /// deadline instead. Apps with size increments (Terminal) never land on exactly
+    /// the frame we asked for, which is what turned that into a feedback loop:
+    /// every apply looked like a user resize and triggered another apply.
+    var suppressEventsUntil: Date = .distantPast
 
     /// Small margin to account for apps that can't fill exactly (size increments, min sizes)
     static let edgeMargin: CGFloat = 8
@@ -374,25 +378,32 @@ class WindowManager: ObservableObject {
 
     /// Cache for app hue colors to avoid expensive recalculation on every render
     private var hueCache: [String: Double] = [:]
-    private var hueCacheLayoutHash: Int = 0
+    private var hueCacheRevision: Int = -1
+
+    /// Bumped whenever the layout's structure changes, so derived caches can tell
+    /// they're stale without re-deriving a signature on every single read.
+    private var layoutRevision: Int = 0
+
+    /// Live drags call applyLayout on every gesture event, and each apply is a
+    /// burst of synchronous cross-process AX writes. Collapse them to at most one
+    /// per interval, last one wins.
+    private var pendingApply = false
+    private var lastApplyTime: Date = .distantPast
+    private static let applyThrottleInterval: TimeInterval = 1.0 / 30.0
+
+    /// One low-frequency timer shared by every active layout — see
+    /// startMaintenanceTimerIfNeeded() for why this is not a display link.
+    private var maintenanceTimer: DispatchSourceTimer?
+    private static let maintenanceInterval: TimeInterval = 1.0
+
+    /// How long to ignore window events after we move windows ourselves.
+    private static let eventSuppressionInterval: TimeInterval = 0.25
 
     // MARK: - Computed Properties (proxy to current monitor's layout)
 
     var currentLayout: MonitorLayout? {
         guard let monitor = selectedMonitor else { return nil }
         return monitorLayouts[monitor.id]
-    }
-
-    /// Get the monitor containing the currently focused window
-    func getMonitorForFocusedWindow() -> Monitor? {
-        guard let focusedWindow = WindowDiscovery.getFrontmostWindow() else { return nil }
-        let windowFrame = focusedWindow.frame
-
-        // Find which monitor contains the window center
-        let windowCenter = CGPoint(x: windowFrame.midX, y: windowFrame.midY)
-        return availableMonitors.first { monitor in
-            monitor.frame.contains(windowCenter)
-        }
     }
 
     /// Get the monitor where the mouse cursor is located (for hotkey detection)
@@ -418,6 +429,7 @@ class WindowManager: ObservableObject {
         set {
             guard let layout = currentLayout else { return }
             layout.layoutMode = newValue
+            layoutRevision &+= 1
             objectWillChange.send()
         }
     }
@@ -427,6 +439,7 @@ class WindowManager: ObservableObject {
         set {
             guard let layout = currentLayout else { return }
             layout.columns = newValue
+            layoutRevision &+= 1
             objectWillChange.send()
         }
     }
@@ -436,6 +449,7 @@ class WindowManager: ObservableObject {
         set {
             guard let layout = currentLayout else { return }
             layout.rows = newValue
+            layoutRevision &+= 1
             objectWillChange.send()
         }
     }
@@ -475,52 +489,16 @@ class WindowManager: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Observe app launches for auto-filling placeholder slots
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(handleAppLaunched(_:)),
-            name: NSWorkspace.didLaunchApplicationNotification,
-            object: nil
-        )
-    }
-
-    @objc private func handleAppLaunched(_ notification: Notification) {
-        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              let bundleId = app.bundleIdentifier,
-              let appName = app.localizedName else { return }
-
-        // Check if any active layout has a placeholder waiting for this app
-        for layout in monitorLayouts.values where layout.isActive {
-            // Delay slightly to let the app create its window
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.tryFillPlaceholder(appName: appName, bundleId: bundleId, in: layout)
-            }
-        }
-    }
-
-    private func tryFillPlaceholder(appName: String, bundleId: String, in layout: MonitorLayout) {
-        // Refresh windows to find the new app's window
-        refreshAvailableWindows()
-
-        // Find any empty placeholder slots matching this app
-        // For now, this is a simplified implementation - full placeholder
-        // tracking would require storing placeholder info in the layout model
-
-        // Try to find a window for this app that isn't already assigned
-        guard let window = availableWindows.first(where: { $0.ownerName == appName }) else { return }
-
-        // If we found a window, refresh the layout to pick it up
-        print("Auto-filled placeholder for \(appName)")
-        objectWillChange.send()
+        // NOTE: a didLaunchApplicationNotification observer used to live here. It
+        // scheduled a full AX rescan of every running app, per active layout,
+        // every time any app launched — to call a placeholder-filling routine
+        // whose entire body was a print. Real placeholder support needs the
+        // layout model to represent an unfilled slot; that is where this hooks
+        // back in once it does.
     }
 
     deinit {
-        // Stop all display links
-        for layout in monitorLayouts.values {
-            if let link = layout.displayLink {
-                CVDisplayLinkStop(link)
-            }
-        }
+        maintenanceTimer?.cancel()
     }
 
     // MARK: - Monitor Management
@@ -1480,121 +1458,114 @@ class WindowManager: ObservableObject {
 
     // MARK: - Resizing
 
+    /// Minimum share of a track that any single pane may occupy
+    static let minPaneProportion: CGFloat = 0.1
+
+    /// Shift `delta` out of the second pane and into the first, clamping at the
+    /// minimum rather than rejecting the whole gesture. Returns nil if there
+    /// isn't room for two panes at all.
+    private static func resolveSplit(first: CGFloat, second: CGFloat, delta: CGFloat) -> (CGFloat, CGFloat)? {
+        let total = first + second
+        guard total > minPaneProportion * 2 else { return nil }
+        let clamped = min(max(first + delta, minPaneProportion), total - minPaneProportion)
+        return (clamped, total - clamped)
+    }
+
     /// Resize a column divider (between columnIndex and columnIndex+1)
-    /// This affects all windows in both adjacent columns
-    func resizeColumnDivider(atIndex dividerIndex: Int, delta: CGFloat) {
-        guard dividerIndex < columns.count - 1 else { return }
+    /// This affects all windows in both adjacent columns.
+    /// `proportionalDelta` is the change since the previous drag event expressed as a
+    /// fraction of the track the columns are drawn in — not a pixel distance. The
+    /// caller owns that conversion because only it knows the on-screen track size.
+    func resizeColumnDivider(atIndex dividerIndex: Int, proportionalDelta: CGFloat) {
+        guard dividerIndex >= 0, dividerIndex + 1 < columns.count else { return }
 
-        let proportionalDelta = delta / containerBounds.width
+        var updated = columns
+        guard let (left, right) = Self.resolveSplit(
+            first: updated[dividerIndex].widthProportion,
+            second: updated[dividerIndex + 1].widthProportion,
+            delta: proportionalDelta
+        ) else { return }
 
-        let leftCol = dividerIndex
-        let rightCol = dividerIndex + 1
+        updated[dividerIndex].widthProportion = left
+        updated[dividerIndex + 1].widthProportion = right
+        columns = updated
 
-        // Minimum column width (10% of screen)
-        let minWidth: CGFloat = 0.1
+        normalizeColumnProportions()
 
-        let newLeftWidth = columns[leftCol].widthProportion + proportionalDelta
-        let newRightWidth = columns[rightCol].widthProportion - proportionalDelta
-
-        // Apply if both columns remain above minimum
-        if newLeftWidth >= minWidth && newRightWidth >= minWidth {
-            columns[leftCol].widthProportion = newLeftWidth
-            columns[rightCol].widthProportion = newRightWidth
-            normalizeColumnProportions()
-
-            if isActive {
-                applyLayout()
-            }
+        if isActive {
+            applyLayoutThrottled()
         }
     }
 
     /// Resize a row divider within a column (between windowIndex and windowIndex+1)
     /// This only affects the two adjacent windows in that column
-    func resizeRowDivider(inColumn columnIndex: Int, atIndex dividerIndex: Int, delta: CGFloat) {
-        guard columnIndex < columns.count else { return }
-        guard dividerIndex < columns[columnIndex].windows.count - 1 else { return }
+    func resizeRowDivider(inColumn columnIndex: Int, atIndex dividerIndex: Int, proportionalDelta: CGFloat) {
+        guard columnIndex >= 0, columnIndex < columns.count else { return }
+        guard dividerIndex >= 0, dividerIndex + 1 < columns[columnIndex].windows.count else { return }
 
-        // Calculate the column's actual height
-        let columnHeight = containerBounds.height
+        var updated = columns
+        guard let (top, bottom) = Self.resolveSplit(
+            first: updated[columnIndex].windows[dividerIndex].heightProportion,
+            second: updated[columnIndex].windows[dividerIndex + 1].heightProportion,
+            delta: proportionalDelta
+        ) else { return }
 
-        let proportionalDelta = delta / columnHeight
+        updated[columnIndex].windows[dividerIndex].heightProportion = top
+        updated[columnIndex].windows[dividerIndex + 1].heightProportion = bottom
+        columns = updated
 
-        let topWindow = dividerIndex
-        let bottomWindow = dividerIndex + 1
+        normalizeWindowProportions(inColumn: columnIndex)
 
-        // Minimum window height (10% of column)
-        let minHeight: CGFloat = 0.1
-
-        let newTopHeight = columns[columnIndex].windows[topWindow].heightProportion + proportionalDelta
-        let newBottomHeight = columns[columnIndex].windows[bottomWindow].heightProportion - proportionalDelta
-
-        // Apply if both windows remain above minimum
-        if newTopHeight >= minHeight && newBottomHeight >= minHeight {
-            columns[columnIndex].windows[topWindow].heightProportion = newTopHeight
-            columns[columnIndex].windows[bottomWindow].heightProportion = newBottomHeight
-            normalizeWindowProportions(inColumn: columnIndex)
-
-            if isActive {
-                applyLayout()
-            }
+        if isActive {
+            applyLayoutThrottled()
         }
     }
 
     // MARK: - Row Mode Resizing
 
     /// Resize the primary divider between rows (affects row heights)
-    func resizeRowPrimaryDivider(atIndex dividerIndex: Int, delta: CGFloat) {
-        guard dividerIndex < rows.count - 1 else { return }
+    func resizeRowPrimaryDivider(atIndex dividerIndex: Int, proportionalDelta: CGFloat) {
+        guard dividerIndex >= 0, dividerIndex + 1 < rows.count else { return }
 
-        let proportionalDelta = delta / containerBounds.height
+        var updated = rows
+        guard let (top, bottom) = Self.resolveSplit(
+            first: updated[dividerIndex].heightProportion,
+            second: updated[dividerIndex + 1].heightProportion,
+            delta: proportionalDelta
+        ) else { return }
 
-        let topRow = dividerIndex
-        let bottomRow = dividerIndex + 1
+        updated[dividerIndex].heightProportion = top
+        updated[dividerIndex + 1].heightProportion = bottom
+        rows = updated
 
-        // Minimum row height (10% of screen)
-        let minHeight: CGFloat = 0.1
+        normalizeRowProportions()
 
-        let newTopHeight = rows[topRow].heightProportion + proportionalDelta
-        let newBottomHeight = rows[bottomRow].heightProportion - proportionalDelta
-
-        // Apply if both rows remain above minimum
-        if newTopHeight >= minHeight && newBottomHeight >= minHeight {
-            rows[topRow].heightProportion = newTopHeight
-            rows[bottomRow].heightProportion = newBottomHeight
-            normalizeRowProportions()
-
-            if isActive {
-                applyLayout()
-            }
+        if isActive {
+            applyLayoutThrottled()
         }
     }
 
     /// Resize a window divider within a row (between windowIndex and windowIndex+1)
     /// This only affects the two adjacent windows in that row
-    func resizeWindowDivider(inRow rowIndex: Int, atIndex dividerIndex: Int, delta: CGFloat) {
-        guard rowIndex < rows.count else { return }
-        guard dividerIndex < rows[rowIndex].windows.count - 1 else { return }
+    func resizeWindowDivider(inRow rowIndex: Int, atIndex dividerIndex: Int, proportionalDelta: CGFloat) {
+        guard rowIndex >= 0, rowIndex < rows.count else { return }
+        guard dividerIndex >= 0, dividerIndex + 1 < rows[rowIndex].windows.count else { return }
 
-        let proportionalDelta = delta / containerBounds.width
+        var updated = rows
+        guard let (left, right) = Self.resolveSplit(
+            first: updated[rowIndex].windows[dividerIndex].widthProportion,
+            second: updated[rowIndex].windows[dividerIndex + 1].widthProportion,
+            delta: proportionalDelta
+        ) else { return }
 
-        let leftWindow = dividerIndex
-        let rightWindow = dividerIndex + 1
+        updated[rowIndex].windows[dividerIndex].widthProportion = left
+        updated[rowIndex].windows[dividerIndex + 1].widthProportion = right
+        rows = updated
 
-        // Minimum window width (10% of row)
-        let minWidth: CGFloat = 0.1
+        normalizeWindowProportions(inRow: rowIndex)
 
-        let newLeftWidth = rows[rowIndex].windows[leftWindow].widthProportion + proportionalDelta
-        let newRightWidth = rows[rowIndex].windows[rightWindow].widthProportion - proportionalDelta
-
-        // Apply if both windows remain above minimum
-        if newLeftWidth >= minWidth && newRightWidth >= minWidth {
-            rows[rowIndex].windows[leftWindow].widthProportion = newLeftWidth
-            rows[rowIndex].windows[rightWindow].widthProportion = newRightWidth
-            normalizeWindowProportions(inRow: rowIndex)
-
-            if isActive {
-                applyLayout()
-            }
+        if isActive {
+            applyLayoutThrottled()
         }
     }
 
@@ -1607,6 +1578,13 @@ class WindowManager: ObservableObject {
             applyColumnsLayout()
         case .rows:
             applyRowsLayout()
+        }
+
+        // Keep the observer's baseline in step with what we just did, and don't
+        // let our own writes bounce back in as user resizes.
+        if let layout = currentLayout, layout.isActive {
+            updateExpectedFrames(for: layout)
+            armEventSuppression(for: layout)
         }
     }
 
@@ -2087,7 +2065,7 @@ class WindowManager: ObservableObject {
         columns = newColumns
 
         if isActive {
-            applyLayout()
+            applyLayoutThrottled()
         }
     }
 
@@ -2130,7 +2108,7 @@ class WindowManager: ObservableObject {
         rows = newRows
 
         if isActive {
-            applyLayout()
+            applyLayoutThrottled()
         }
     }
 
@@ -2146,19 +2124,11 @@ class WindowManager: ObservableObject {
         // Hide monitor highlight when actively managing
         MonitorHighlightWindow.hide()
 
-        // Check for placeholder apps that need launching
-        let placeholdersToLaunch = findPlaceholderAppsToLaunch(in: layout)
-        if !placeholdersToLaunch.isEmpty {
-            // Launch apps and wait for windows, then continue
-            launchPlaceholderApps(placeholdersToLaunch) { [weak self, weak layout] in
-                guard let self = self, let layout = layout else { return }
-                self.refreshAvailableWindows()
-                self.rematchPlaceholderSlots(in: layout, for: placeholdersToLaunch)
-                self.finishStartManaging(layout: layout)
-            }
-        } else {
-            finishStartManaging(layout: layout)
-        }
+        // Placeholder apps (launch-on-load for slots whose app isn't running) were
+        // scaffolded here, but the discovery step always returned an empty list, so
+        // the launch/wait/rematch machinery could never run. Removed rather than
+        // left to rot; it needs a layout model that can hold an unfilled slot.
+        finishStartManaging(layout: layout)
     }
 
     private func finishStartManaging(layout: MonitorLayout) {
@@ -2172,103 +2142,11 @@ class WindowManager: ObservableObject {
         // Set up event-driven window observation (replaces constant polling)
         setupWindowObserver(for: layout)
 
-        // Create display link for periodic tasks (closed window detection only, ~1/sec)
-        setupDisplayLink(for: layout)
+        // Shared 1Hz timer handles closed-window detection for every active layout
+        startMaintenanceTimerIfNeeded()
 
         // Notify menu bar
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
-    }
-
-    /// Find placeholder slots that need apps launched
-    private func findPlaceholderAppsToLaunch(in layout: MonitorLayout) -> [(bundleId: String, appName: String)] {
-        var appsToLaunch: [(bundleId: String, appName: String)] = []
-        var seenBundleIds = Set<String>()
-
-        // Check column windows for empty slots with known bundle IDs
-        for column in layout.columns {
-            // Empty slots would need a way to track - for now, check if windows match expected apps
-            // This is a simplified check - full implementation would track placeholder slots
-        }
-
-        // For now, return empty - full placeholder tracking needs more model changes
-        return appsToLaunch
-    }
-
-    /// Launch placeholder apps and wait for windows
-    private func launchPlaceholderApps(_ apps: [(bundleId: String, appName: String)], completion: @escaping () -> Void) {
-        guard !apps.isEmpty else {
-            completion()
-            return
-        }
-
-        // Launch all apps
-        for app in apps {
-            AppLauncher.launchApp(bundleId: app.bundleId)
-            print("Launched placeholder app: \(app.appName)")
-        }
-
-        // Wait for windows to appear (up to 5 seconds)
-        let bundleIds = Set(apps.map { $0.bundleId })
-        waitForWindows(bundleIds: bundleIds, timeout: 5.0) {
-            DispatchQueue.main.async {
-                completion()
-            }
-        }
-    }
-
-    /// Wait for all specified apps to have windows
-    private func waitForWindows(bundleIds: Set<String>, timeout: TimeInterval, completion: @escaping () -> Void) {
-        let startTime = Date()
-
-        func check() {
-            let elapsed = Date().timeIntervalSince(startTime)
-
-            if elapsed >= timeout {
-                print("Placeholder timeout - continuing with available windows")
-                completion()
-                return
-            }
-
-            // Check if all apps have windows
-            var allReady = true
-            for bundleId in bundleIds {
-                if !AppLauncher.hasWindows(bundleId: bundleId) {
-                    allReady = false
-                    break
-                }
-            }
-
-            if allReady {
-                print("All placeholder apps ready")
-                completion()
-            } else {
-                // Check again in 200ms
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    check()
-                }
-            }
-        }
-
-        check()
-    }
-
-    /// Re-match placeholder slots after apps are launched
-    private func rematchPlaceholderSlots(in layout: MonitorLayout, for apps: [(bundleId: String, appName: String)]) {
-        // Refresh and try to match windows to empty slots
-        let appNames = Set(apps.map { $0.appName })
-
-        switch layout.layoutMode {
-        case .columns:
-            for i in layout.columns.indices {
-                for j in layout.columns[i].windows.indices {
-                    // If this slot has no window but matches a launched app, try to fill it
-                    // This requires tracking placeholder slots - simplified for now
-                }
-            }
-        case .rows:
-            // Similar for rows
-            break
-        }
     }
 
     private func setupWindowObserver(for layout: MonitorLayout) {
@@ -2305,7 +2183,8 @@ class WindowManager: ObservableObject {
     }
 
     private func handleWindowEvent(element: AXUIElement, for layout: MonitorLayout) {
-        guard !layout.isApplyingLayout else { return }
+        // Drop notifications caused by our own writes — see suppressEventsUntil.
+        guard Date() >= layout.suppressEventsUntil else { return }
 
         // Find which window changed and compare to expected
         guard let currentFrame = ExternalWindow.getFrame(from: element) else { return }
@@ -2354,62 +2233,46 @@ class WindowManager: ObservableObject {
                                       windowIndex: change.winIndex, delta: change.delta)
             }
 
-            layout.isApplyingLayout = true
-            layout.framesSinceApply = 0
             applyLayoutAndUpdateExpected(for: layout)
-            layout.isApplyingLayout = false
         }
     }
 
-    private func setupDisplayLink(for layout: MonitorLayout) {
-        // Create display link
-        var link: CVDisplayLink?
-        CVDisplayLinkCreateWithActiveCGDisplays(&link)
-        guard let displayLink = link else {
-            print("Failed to create display link")
-            return
+    /// Start the shared maintenance timer if it isn't already running.
+    ///
+    /// This replaces what used to be a 60Hz CVDisplayLink *per monitor*, each of
+    /// whose callbacks looped over every active layout — so N monitors cost N²
+    /// work per frame, and the once-per-second closed-window check actually ran N
+    /// times a second. Everything that needs to be responsive is event-driven via
+    /// WindowObserver; all this timer does is notice windows that have gone away,
+    /// so 1Hz with generous leeway is plenty and lets the CPU stay asleep.
+    /// (CVDisplayLink is also deprecated as of macOS 15.)
+    private func startMaintenanceTimerIfNeeded() {
+        guard maintenanceTimer == nil else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now() + Self.maintenanceInterval,
+            repeating: Self.maintenanceInterval,
+            leeway: .milliseconds(250)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.performMaintenance()
         }
-
-        // Set it to this monitor's display
-        if let screenNumber = layout.screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
-            CVDisplayLinkSetCurrentCGDisplay(displayLink, screenNumber)
-        }
-
-        // Set the callback - passes the layout's monitor ID
-        let callback: CVDisplayLinkOutputCallback = { displayLink, inNow, inOutputTime, flagsIn, flagsOut, context in
-            guard let context = context else { return kCVReturnSuccess }
-            let manager = Unmanaged<WindowManager>.fromOpaque(context).takeUnretainedValue()
-            // We need to sync all active layouts
-            manager.displayLinkFired()
-            return kCVReturnSuccess
-        }
-
-        let pointer = Unmanaged.passUnretained(self).toOpaque()
-        CVDisplayLinkSetOutputCallback(displayLink, callback, pointer)
-
-        // Start the display link
-        CVDisplayLinkStart(displayLink)
-        layout.displayLink = displayLink
-
-        // Log the refresh rate
-        let refreshPeriod = CVDisplayLinkGetActualOutputVideoRefreshPeriod(displayLink)
-        if refreshPeriod > 0 {
-            let fps = 1.0 / refreshPeriod
-            print("Display link started for \(layout.monitorId) at \(Int(fps)) Hz")
-        }
+        timer.resume()
+        maintenanceTimer = timer
     }
 
-    private func displayLinkFired() {
-        // CVDisplayLink fires on a background thread, dispatch to main for UI/AX work
-        DispatchQueue.main.async { [weak self] in
-            self?.syncAllActiveLayouts()
-        }
+    /// Tear the timer down once nothing is being managed, so an idle menu bar app
+    /// schedules no wakeups at all.
+    private func stopMaintenanceTimerIfIdle() {
+        guard !hasAnyActiveLayout else { return }
+        maintenanceTimer?.cancel()
+        maintenanceTimer = nil
     }
 
-    /// Sync all active monitor layouts
-    private func syncAllActiveLayouts() {
+    private func performMaintenance() {
         for layout in monitorLayouts.values where layout.isActive {
-            syncLoop(for: layout)
+            checkForClosedWindows(in: layout)
         }
     }
 
@@ -2423,11 +2286,8 @@ class WindowManager: ObservableObject {
         layout.windowObserver?.stopObserving()
         layout.windowObserver = nil
 
-        if let link = layout.displayLink {
-            CVDisplayLinkStop(link)
-            layout.displayLink = nil
-        }
         layout.expectedFrames.removeAll()
+        stopMaintenanceTimerIfIdle()
 
         // Show highlight again when not actively managing
         if let monitor = selectedMonitor {
@@ -2447,7 +2307,7 @@ class WindowManager: ObservableObject {
 
     /// Start managing all configured monitors
     func startAllLayouts() {
-        for (monitorId, layout) in monitorLayouts {
+        for layout in monitorLayouts.values {
             // Only start if layout has windows configured
             let hasWindows = !layout.columns.isEmpty || !layout.rows.isEmpty
             guard hasWindows else { continue }
@@ -2455,16 +2315,16 @@ class WindowManager: ObservableObject {
             layout.isActive = true
             layout.appState = .active
 
-            // Apply initial layout and store expected frames
-            applyLayoutForMonitor(layout)
+            // Apply initial layout and store expected frames.
+            // applyLayoutAndUpdateExpected applies the layout itself — calling
+            // applyLayoutForMonitor first as well meant every start moved every
+            // window twice.
             applyLayoutAndUpdateExpected(for: layout)
 
             // Set up event-driven window observation
             setupWindowObserver(for: layout)
-
-            // Create display link (now only for closed window detection)
-            setupDisplayLink(for: layout)
         }
+        startMaintenanceTimerIfNeeded()
         objectWillChange.send()
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
     }
@@ -2479,12 +2339,9 @@ class WindowManager: ObservableObject {
             layout.windowObserver?.stopObserving()
             layout.windowObserver = nil
 
-            if let link = layout.displayLink {
-                CVDisplayLinkStop(link)
-                layout.displayLink = nil
-            }
             layout.expectedFrames.removeAll()
         }
+        stopMaintenanceTimerIfIdle()
         MonitorHighlightWindow.hide()
         objectWillChange.send()
         NotificationCenter.default.post(name: NSNotification.Name("WindowManagerActiveChanged"), object: nil)
@@ -2546,8 +2403,21 @@ class WindowManager: ObservableObject {
 
     private func applyLayoutAndUpdateExpected(for layout: MonitorLayout) {
         applyLayoutForMonitor(layout)
+        updateExpectedFrames(for: layout)
+        armEventSuppression(for: layout)
+    }
 
-        // Store what we expect each window's frame to be
+    /// Briefly ignore incoming move/resize notifications, so the windows we just
+    /// moved don't read back as user edits.
+    private func armEventSuppression(for layout: MonitorLayout) {
+        layout.suppressEventsUntil = Date().addingTimeInterval(Self.eventSuppressionInterval)
+    }
+
+    /// Recompute the frame we believe each managed window now occupies. Incoming
+    /// window events are judged against these, so every path that moves windows
+    /// has to refresh them — including live divider drags, which previously left
+    /// them stale and so made each drag look like a user resize to undo.
+    private func updateExpectedFrames(for layout: MonitorLayout) {
         layout.expectedFrames.removeAll()
 
         switch layout.layoutMode {
@@ -2641,20 +2511,6 @@ class WindowManager: ObservableObject {
         }
     }
 
-    private func syncLoop(for layout: MonitorLayout) {
-        // With event-driven sync via WindowObserver, this loop now only handles:
-        // 1. Periodic closed window detection
-        // 2. Counter maintenance for debouncing
-
-        layout.framesSinceApply += 1
-
-        // Check for closed windows approximately once per second (60 frames at 60fps)
-        // This is now the only regular AX API call we make
-        if layout.framesSinceApply % 60 == 0 {
-            checkForClosedWindows(in: layout)
-        }
-    }
-
     /// Convert NSScreen frame to AX coordinates for comparison
     private func convertFrameToAXCoordinates(_ frame: CGRect) -> CGRect {
         guard let mainScreen = NSScreen.screens.first else { return frame }
@@ -2664,99 +2520,91 @@ class WindowManager: ObservableObject {
     }
 
     private func checkForClosedWindows(in layout: MonitorLayout) {
+        // Collect first, mutate afterwards. Removing during the walk invalidates
+        // the indices the remaining iterations are about to use, so two windows
+        // disappearing at once could delete the wrong column entirely.
+        var closedCellIds: [UUID] = []
+
+        for cell in managedCells(in: layout) {
+            guard let window = cell.window else { continue }
+            // Only treat as closed when the frame is unreadable AND the owning
+            // process is gone — AX calls also time out during system sleep, and
+            // dropping windows then is what used to empty layouts overnight.
+            if ExternalWindow.getFrame(from: window.axElement) == nil,
+               kill(window.ownerPID, 0) != 0 {
+                closedCellIds.append(cell.id)
+            }
+            // TODO: Check nested container windows
+        }
+
+        guard !closedCellIds.isEmpty else { return }
+
+        for cellId in closedCellIds {
+            removeClosedCell(cellId, in: layout)
+        }
+        refreshAvailableWindows()
+        objectWillChange.send()
+    }
+
+    /// Every top-level cell in a layout, paired with its window if it holds one.
+    private func managedCells(in layout: MonitorLayout) -> [(id: UUID, window: ExternalWindow?)] {
         switch layout.layoutMode {
         case .columns:
-            for (colIndex, column) in layout.columns.enumerated() {
-                for colWindow in column.windows {
-                    // Only check single windows, not nested containers
-                    if let window = colWindow.window {
-                        // Only remove if we can't get the frame AND the process is dead
-                        // This prevents removing windows during sleep when AX calls timeout
-                        if ExternalWindow.getFrame(from: window.axElement) == nil {
-                            let processExists = kill(window.ownerPID, 0) == 0
-                            if !processExists {
-                                DispatchQueue.main.async { [weak self] in
-                                    self?.removeWindow(colWindow.id, fromColumn: colIndex, in: layout)
-                                }
-                            }
-                        }
-                    }
-                    // TODO: Check nested container windows
-                }
-            }
+            return layout.columns.flatMap { $0.windows.map { (id: $0.id, window: $0.window) } }
         case .rows:
-            for (rowIndex, row) in layout.rows.enumerated() {
-                for rowWindow in row.windows {
-                    // Only check single windows, not nested containers
-                    if let window = rowWindow.window {
-                        // Only remove if we can't get the frame AND the process is dead
-                        if ExternalWindow.getFrame(from: window.axElement) == nil {
-                            let processExists = kill(window.ownerPID, 0) == 0
-                            if !processExists {
-                                DispatchQueue.main.async { [weak self] in
-                                    self?.removeWindow(rowWindow.id, fromRow: rowIndex, in: layout)
-                                }
-                            }
-                        }
+            return layout.rows.flatMap { $0.windows.map { (id: $0.id, window: $0.window) } }
+        }
+    }
+
+    /// Remove a cell from whichever column/row currently holds it, collapsing the
+    /// container if that empties it. Resolves the position by id at call time
+    /// rather than trusting an index captured earlier.
+    private func removeClosedCell(_ cellId: UUID, in layout: MonitorLayout) {
+        switch layout.layoutMode {
+        case .columns:
+            guard let colIndex = layout.columns.firstIndex(where: { column in
+                column.windows.contains { $0.id == cellId }
+            }) else { return }
+
+            layout.columns[colIndex].windows.removeAll { $0.id == cellId }
+
+            if layout.columns[colIndex].windows.isEmpty {
+                layout.columns.remove(at: colIndex)
+                if !layout.columns.isEmpty {
+                    let newWidth = 1.0 / CGFloat(layout.columns.count)
+                    for i in layout.columns.indices {
+                        layout.columns[i].widthProportion = newWidth
                     }
-                    // TODO: Check nested container windows
+                }
+            } else {
+                let newProportion = 1.0 / CGFloat(layout.columns[colIndex].windows.count)
+                for i in layout.columns[colIndex].windows.indices {
+                    layout.columns[colIndex].windows[i].heightProportion = newProportion
+                }
+            }
+
+        case .rows:
+            guard let rowIndex = layout.rows.firstIndex(where: { row in
+                row.windows.contains { $0.id == cellId }
+            }) else { return }
+
+            layout.rows[rowIndex].windows.removeAll { $0.id == cellId }
+
+            if layout.rows[rowIndex].windows.isEmpty {
+                layout.rows.remove(at: rowIndex)
+                if !layout.rows.isEmpty {
+                    let newHeight = 1.0 / CGFloat(layout.rows.count)
+                    for i in layout.rows.indices {
+                        layout.rows[i].heightProportion = newHeight
+                    }
+                }
+            } else {
+                let newProportion = 1.0 / CGFloat(layout.rows[rowIndex].windows.count)
+                for i in layout.rows[rowIndex].windows.indices {
+                    layout.rows[rowIndex].windows[i].widthProportion = newProportion
                 }
             }
         }
-    }
-
-    private func removeWindow(_ windowId: UUID, fromColumn columnIndex: Int, in layout: MonitorLayout) {
-        guard columnIndex < layout.columns.count else { return }
-
-        layout.columns[columnIndex].windows.removeAll { $0.id == windowId }
-
-        // Remove empty column and redistribute widths
-        if layout.columns[columnIndex].windows.isEmpty {
-            layout.columns.remove(at: columnIndex)
-            if !layout.columns.isEmpty {
-                let newWidth = 1.0 / CGFloat(layout.columns.count)
-                for i in 0..<layout.columns.count {
-                    layout.columns[i].widthProportion = newWidth
-                }
-            }
-        } else {
-            // Recalculate height proportions within column
-            let count = layout.columns[columnIndex].windows.count
-            let newProportion = 1.0 / CGFloat(count)
-            for i in 0..<count {
-                layout.columns[columnIndex].windows[i].heightProportion = newProportion
-            }
-        }
-
-        refreshAvailableWindows()
-        objectWillChange.send()
-    }
-
-    private func removeWindow(_ windowId: UUID, fromRow rowIndex: Int, in layout: MonitorLayout) {
-        guard rowIndex < layout.rows.count else { return }
-
-        layout.rows[rowIndex].windows.removeAll { $0.id == windowId }
-
-        // Remove empty row and redistribute heights
-        if layout.rows[rowIndex].windows.isEmpty {
-            layout.rows.remove(at: rowIndex)
-            if !layout.rows.isEmpty {
-                let newHeight = 1.0 / CGFloat(layout.rows.count)
-                for i in 0..<layout.rows.count {
-                    layout.rows[i].heightProportion = newHeight
-                }
-            }
-        } else {
-            // Recalculate width proportions within row
-            let count = layout.rows[rowIndex].windows.count
-            let newProportion = 1.0 / CGFloat(count)
-            for i in 0..<count {
-                layout.rows[rowIndex].windows[i].widthProportion = newProportion
-            }
-        }
-
-        refreshAvailableWindows()
-        objectWillChange.send()
     }
 
     struct FrameDelta {
@@ -2960,51 +2808,64 @@ class WindowManager: ObservableObject {
         }
     }
 
-    /// Get evenly-spaced hue for an app name based on unique apps in current layout
-    /// Uses caching to avoid expensive recalculation on every render
+    /// Evenly-spaced hue for an app, distributed across the apps in the layout.
+    ///
+    /// Called from every tile's body on every render, so it must not walk the whole
+    /// layout each time — the previous version flat-mapped every window, sorted the
+    /// names and hashed them before it even consulted the cache. The palette is now
+    /// rebuilt only when the layout revision actually moves.
     func hueForApp(_ appName: String) -> Double {
-        // Get all unique app names in current layout (including from nested containers)
-        var allAppNames: [String] = []
-        switch layoutMode {
-        case .columns:
-            allAppNames = columns.flatMap { $0.windows.flatMap { $0.allWindows.map { $0.ownerName } } }
-        case .rows:
-            allAppNames = rows.flatMap { $0.windows.flatMap { $0.allWindows.map { $0.ownerName } } }
+        if hueCacheRevision != layoutRevision {
+            rebuildHuePalette()
         }
-
-        // Check if cache is still valid (layout hasn't changed)
-        let currentHash = allAppNames.sorted().hashValue
-        if currentHash != hueCacheLayoutHash {
-            // Layout changed, invalidate cache
-            hueCache.removeAll()
-            hueCacheLayoutHash = currentHash
-        }
-
-        // Return cached value if available
         if let cached = hueCache[appName] {
             return cached
         }
 
-        // Calculate hue
-        let uniqueApps = Array(Set(allAppNames)).sorted()
-        let hue: Double
+        // Not part of the layout (sidebar rows, windows mid-add): derive a stable
+        // hue from the name rather than rebuilding the whole palette for it.
+        let fallback = Double(abs(appName.hashValue) % 360) / 360.0
+        hueCache[appName] = fallback
+        return fallback
+    }
 
-        if uniqueApps.isEmpty {
-            // Fallback to hash-based if no apps
-            hue = Double(abs(appName.hashValue) % 360) / 360.0
-        } else if let index = uniqueApps.firstIndex(of: appName) {
-            // Evenly space hues around the wheel
-            hue = Double(index) / Double(uniqueApps.count)
-        } else {
-            // App not in layout yet - use golden angle offset from last color
-            let goldenAngle = 0.618033988749895
-            let baseHue = Double(uniqueApps.count) / Double(max(uniqueApps.count, 1))
-            hue = (baseHue + goldenAngle).truncatingRemainder(dividingBy: 1.0)
+    private func rebuildHuePalette() {
+        hueCacheRevision = layoutRevision
+        hueCache.removeAll()
+
+        let appNames: [String]
+        switch layoutMode {
+        case .columns:
+            appNames = columns.flatMap { $0.windows.flatMap { $0.allWindows.map(\.ownerName) } }
+        case .rows:
+            appNames = rows.flatMap { $0.windows.flatMap { $0.allWindows.map(\.ownerName) } }
         }
 
-        // Cache and return
-        hueCache[appName] = hue
-        return hue
+        let uniqueApps = Array(Set(appNames)).sorted()
+        guard !uniqueApps.isEmpty else { return }
+        for (index, name) in uniqueApps.enumerated() {
+            hueCache[name] = Double(index) / Double(uniqueApps.count)
+        }
+    }
+
+    /// Coalescing wrapper around applyLayout for gesture-driven callers.
+    func applyLayoutThrottled() {
+        guard !pendingApply else { return }
+
+        let elapsed = Date().timeIntervalSince(lastApplyTime)
+        guard elapsed < Self.applyThrottleInterval else {
+            applyLayout()
+            lastApplyTime = Date()
+            return
+        }
+
+        pendingApply = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + (Self.applyThrottleInterval - elapsed)) { [weak self] in
+            guard let self else { return }
+            self.pendingApply = false
+            self.applyLayout()
+            self.lastApplyTime = Date()
+        }
     }
 
     // MARK: - Layout Persistence
@@ -3222,34 +3083,11 @@ class WindowManager: ObservableObject {
         return result
     }
 
-    func saveMonitorPreset(slot: Int, monitorId: String) {
-        guard let layout = monitorLayouts[monitorId] else { return }
-
-        let saved = createSavedLayout(from: layout, name: "Preset \(slot)", presetSlot: slot)
-
-        var presets = loadMonitorPresetsList()
-        presets.removeAll { $0.presetSlot == slot && $0.monitorId == monitorId }
-        presets.append(saved)
-
-        if let data = try? JSONEncoder().encode(presets) {
-            UserDefaults.standard.set(data, forKey: Self.monitorPresetsKey)
-        }
-    }
-
-    func loadMonitorPreset(_ preset: SavedLayout, into monitorId: String) {
-        guard let layout = monitorLayouts[monitorId] else { return }
-        loadLayoutIntoMonitor(saved: preset, layout: layout)
-        // Auto-start managing after loading a preset via hotkey
-        startManaging()
-    }
-
-    func deleteMonitorPreset(slot: Int, monitorId: String) {
-        var presets = loadMonitorPresetsList()
-        presets.removeAll { $0.presetSlot == slot && $0.monitorId == monitorId }
-        if let data = try? JSONEncoder().encode(presets) {
-            UserDefaults.standard.set(data, forKey: Self.monitorPresetsKey)
-        }
-    }
+    // NOTE: saveMonitorPreset/deleteMonitorPreset/loadMonitorPreset(_:into:) used
+    // to sit here, all unreachable. loadMonitorPreset was also wrong — it took a
+    // monitorId, then called startManaging(), which acts on whichever monitor is
+    // *selected*. The live paths are saveCurrentLayout(presetSlot:) for saving and
+    // handleMonitorPresetLoad(slot:) for loading; anything new should use those.
 
     private func loadMonitorPresetsList() -> [SavedLayout] {
         guard let data = UserDefaults.standard.data(forKey: Self.monitorPresetsKey),
@@ -3272,33 +3110,9 @@ class WindowManager: ObservableObject {
         loadWorkspacesList().first { $0.presetSlot == slot }
     }
 
-    func saveWorkspacePreset(slot: Int) {
-        var monitorSavedLayouts: [SavedLayout] = []
-
-        for (_, layout) in monitorLayouts {
-            let hasWindows = !layout.columns.isEmpty || !layout.rows.isEmpty
-            guard hasWindows else { continue }
-
-            let saved = createSavedLayout(from: layout, name: "Workspace \(slot)", presetSlot: nil)
-            monitorSavedLayouts.append(saved)
-        }
-
-        guard !monitorSavedLayouts.isEmpty else { return }
-
-        let workspace = WorkspaceLayout(
-            name: "Workspace \(slot)",
-            monitorLayouts: monitorSavedLayouts,
-            presetSlot: slot
-        )
-
-        var workspaces = loadWorkspacesList()
-        workspaces.removeAll { $0.presetSlot == slot }
-        workspaces.append(workspace)
-
-        if let data = try? JSONEncoder().encode(workspaces) {
-            UserDefaults.standard.set(data, forKey: Self.workspacePresetsKey)
-        }
-    }
+    // NOTE: saveWorkspacePreset(slot:) was here and unreachable — a near-duplicate
+    // of saveWorkspaceLayout(name:presetSlot:), which is what the Save dialog
+    // actually calls. Removed so there's one way to write a workspace preset.
 
     func loadWorkspacePreset(_ workspace: WorkspaceLayout) {
         for savedLayout in workspace.monitorLayouts {

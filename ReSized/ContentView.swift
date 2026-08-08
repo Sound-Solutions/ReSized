@@ -761,7 +761,12 @@ struct LayoutPreview: View {
                         }
 
                         if index < windowManager.columns.count - 1 {
-                            ColumnDividerHandle(dividerIndex: index)
+                            // Must match the width ColumnPreview lays itself out in
+                            ColumnDividerHandle(
+                                dividerIndex: index,
+                                trackWidth: (geometry.size.width - 32)
+                                    - CGFloat(windowManager.columns.count - 1) * 8
+                            )
                         }
                     }
                 }
@@ -789,7 +794,12 @@ struct LayoutPreview: View {
                         }
 
                         if index < windowManager.rows.count - 1 {
-                            RowPrimaryDividerHandle(dividerIndex: index)
+                            // Must match the height RowPreview lays itself out in
+                            RowPrimaryDividerHandle(
+                                dividerIndex: index,
+                                trackHeight: (geometry.size.height - 32)
+                                    - CGFloat(windowManager.rows.count - 1) * 8
+                            )
                         }
                     }
                 }
@@ -875,7 +885,11 @@ struct ColumnPreview: View {
 
                         // Row divider (except after last window)
                         if winIndex < column.windows.count - 1 {
-                            RowDividerHandle(columnIndex: columnIndex, dividerIndex: winIndex)
+                            RowDividerHandle(
+                                columnIndex: columnIndex,
+                                dividerIndex: winIndex,
+                                trackHeight: windowsHeight
+                            )
                         }
                     }
                 }
@@ -1321,8 +1335,13 @@ struct NestedDropZone: View {
 
 struct ColumnDividerHandle: View {
     let dividerIndex: Int
+    /// On-screen width of the track the columns are drawn in. Drag distance is
+    /// meaningless to the layout model without it — the model stores proportions,
+    /// and the preview is a different size from the monitor it represents.
+    let trackWidth: CGFloat
     @EnvironmentObject var windowManager: WindowManager
     @State private var isDragging = false
+    @State private var lastTranslation: CGFloat = 0
 
     var body: some View {
         Rectangle()
@@ -1333,10 +1352,19 @@ struct ColumnDividerHandle: View {
                 DragGesture()
                     .onChanged { value in
                         isDragging = true
-                        windowManager.resizeColumnDivider(atIndex: dividerIndex, delta: value.translation.width)
+                        // translation is cumulative from the start of the gesture,
+                        // so send only what changed since the previous event.
+                        let step = value.translation.width - lastTranslation
+                        lastTranslation = value.translation.width
+                        guard trackWidth > 0 else { return }
+                        windowManager.resizeColumnDivider(
+                            atIndex: dividerIndex,
+                            proportionalDelta: step / trackWidth
+                        )
                     }
                     .onEnded { _ in
                         isDragging = false
+                        lastTranslation = 0
                     }
             )
             .onHover { hovering in
@@ -1352,8 +1380,11 @@ struct ColumnDividerHandle: View {
 struct RowDividerHandle: View {
     let columnIndex: Int
     let dividerIndex: Int
+    /// On-screen height of the track the stacked windows are drawn in.
+    let trackHeight: CGFloat
     @EnvironmentObject var windowManager: WindowManager
     @State private var isDragging = false
+    @State private var lastTranslation: CGFloat = 0
 
     var body: some View {
         Rectangle()
@@ -1364,14 +1395,18 @@ struct RowDividerHandle: View {
                 DragGesture()
                     .onChanged { value in
                         isDragging = true
+                        let step = value.translation.height - lastTranslation
+                        lastTranslation = value.translation.height
+                        guard trackHeight > 0 else { return }
                         windowManager.resizeRowDivider(
                             inColumn: columnIndex,
                             atIndex: dividerIndex,
-                            delta: value.translation.height
+                            proportionalDelta: step / trackHeight
                         )
                     }
                     .onEnded { _ in
                         isDragging = false
+                        lastTranslation = 0
                     }
             )
             .onHover { hovering in
@@ -1463,7 +1498,11 @@ struct RowPreview: View {
 
                         // Window divider within row (except after last window)
                         if winIndex < row.windows.count - 1 {
-                            RowWindowDividerHandle(rowIndex: rowIndex, dividerIndex: winIndex)
+                            RowWindowDividerHandle(
+                                rowIndex: rowIndex,
+                                dividerIndex: winIndex,
+                                trackWidth: windowsWidth
+                            )
                         }
                     }
                 }
@@ -1589,8 +1628,11 @@ struct RowWindowTilePreview: View {
 /// Horizontal divider between rows (for resizing row heights)
 struct RowPrimaryDividerHandle: View {
     let dividerIndex: Int
+    /// On-screen height of the track the rows are drawn in.
+    let trackHeight: CGFloat
     @EnvironmentObject var windowManager: WindowManager
     @State private var isDragging = false
+    @State private var lastTranslation: CGFloat = 0
 
     var body: some View {
         Rectangle()
@@ -1601,10 +1643,17 @@ struct RowPrimaryDividerHandle: View {
                 DragGesture()
                     .onChanged { value in
                         isDragging = true
-                        windowManager.resizeRowPrimaryDivider(atIndex: dividerIndex, delta: value.translation.height)
+                        let step = value.translation.height - lastTranslation
+                        lastTranslation = value.translation.height
+                        guard trackHeight > 0 else { return }
+                        windowManager.resizeRowPrimaryDivider(
+                            atIndex: dividerIndex,
+                            proportionalDelta: step / trackHeight
+                        )
                     }
                     .onEnded { _ in
                         isDragging = false
+                        lastTranslation = 0
                     }
             )
             .onHover { hovering in
@@ -1621,8 +1670,11 @@ struct RowPrimaryDividerHandle: View {
 struct RowWindowDividerHandle: View {
     let rowIndex: Int
     let dividerIndex: Int
+    /// On-screen width of the track the side-by-side windows are drawn in.
+    let trackWidth: CGFloat
     @EnvironmentObject var windowManager: WindowManager
     @State private var isDragging = false
+    @State private var lastTranslation: CGFloat = 0
 
     var body: some View {
         Rectangle()
@@ -1633,14 +1685,18 @@ struct RowWindowDividerHandle: View {
                 DragGesture()
                     .onChanged { value in
                         isDragging = true
+                        let step = value.translation.width - lastTranslation
+                        lastTranslation = value.translation.width
+                        guard trackWidth > 0 else { return }
                         windowManager.resizeWindowDivider(
                             inRow: rowIndex,
                             atIndex: dividerIndex,
-                            delta: value.translation.width
+                            proportionalDelta: step / trackWidth
                         )
                     }
                     .onEnded { _ in
                         isDragging = false
+                        lastTranslation = 0
                     }
             )
             .onHover { hovering in
@@ -1920,14 +1976,21 @@ struct ActiveLayoutPreview: View {
                                     .frame(height: (geometry.size.height - 20) * colWindow.heightProportion)
 
                                 if winIndex < column.windows.count - 1 {
-                                    RowDividerHandle(columnIndex: index, dividerIndex: winIndex)
+                                    RowDividerHandle(
+                                        columnIndex: index,
+                                        dividerIndex: winIndex,
+                                        trackHeight: geometry.size.height - 20
+                                    )
                                 }
                             }
                         }
                         .frame(width: (geometry.size.width - 20) * column.widthProportion)
 
                         if index < windowManager.columns.count - 1 {
-                            ColumnDividerHandle(dividerIndex: index)
+                            ColumnDividerHandle(
+                                dividerIndex: index,
+                                trackWidth: geometry.size.width - 20
+                            )
                         }
                     }
                 }
@@ -1942,14 +2005,21 @@ struct ActiveLayoutPreview: View {
                                     .frame(width: (geometry.size.width - 20) * rowWindow.widthProportion)
 
                                 if winIndex < row.windows.count - 1 {
-                                    RowWindowDividerHandle(rowIndex: index, dividerIndex: winIndex)
+                                    RowWindowDividerHandle(
+                                        rowIndex: index,
+                                        dividerIndex: winIndex,
+                                        trackWidth: geometry.size.width - 20
+                                    )
                                 }
                             }
                         }
                         .frame(height: (geometry.size.height - 20) * row.heightProportion)
 
                         if index < windowManager.rows.count - 1 {
-                            RowPrimaryDividerHandle(dividerIndex: index)
+                            RowPrimaryDividerHandle(
+                                dividerIndex: index,
+                                trackHeight: geometry.size.height - 20
+                            )
                         }
                     }
                 }
