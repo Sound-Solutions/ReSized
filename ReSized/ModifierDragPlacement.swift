@@ -379,6 +379,11 @@ extension WindowManager {
 
     private func showDropIndicator(_ target: DesktopDropTarget, on layout: MonitorLayout) {
         let screenRect = convertFrameFromAXCoordinates(target.indicatorRect)
+        if layout.seamOverlay?.seamView?.dropIndicator?.rect != screenRect {
+            AccessibilityHelper.logDebug(
+                "drag-diag: band dest=\(target.destination) screen=(\(Int(screenRect.minX)),\(Int(screenRect.minY)) \(Int(screenRect.width))x\(Int(screenRect.height)))"
+            )
+        }
         for other in monitorLayouts.values where other !== layout {
             other.seamOverlay?.seamView?.dropIndicator = nil
         }

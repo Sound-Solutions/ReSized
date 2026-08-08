@@ -46,7 +46,51 @@ func nearestDropTarget(
     return best
 }
 
+/// Throttle for the drag diagnostics below — dropTargets runs per drag event.
+private var lastDropDiagnosticsLog = Date.distantPast
+
 extension WindowManager {
+    /// One snapshot a second of what the drop-target builder believes the grid
+    /// is, against what the model holds — a cell with no recorded frame
+    /// silently vanishes from the seams, which reads as bands for a grid that
+    /// matches nothing on screen.
+    private func logDropDiagnostics(for layout: MonitorLayout, tiles: [TileFrame], columnsMode: Bool) {
+        guard Date().timeIntervalSince(lastDropDiagnosticsLog) > 1 else { return }
+        lastDropDiagnosticsLog = Date()
+
+        func desc(_ r: CGRect) -> String {
+            "(\(Int(r.minX)),\(Int(r.minY)) \(Int(r.width))x\(Int(r.height)))"
+        }
+
+        AccessibilityHelper.logDebug(
+            "drag-diag: mode=\(layout.layoutMode.rawValue) expectedFrames=\(layout.expectedFrames.count) tiles=\(tiles.count)"
+        )
+        if columnsMode {
+            for (c, column) in layout.columns.enumerated() {
+                for (w, cell) in column.windows.enumerated() {
+                    let name = cell.window.map { "\($0.ownerName) '\($0.title.prefix(20))'" }
+                        ?? "split(\(cell.nestedContainer?.children.count ?? 0))"
+                    let frame = layout.expectedFrames[cell.id].map(desc) ?? "NO FRAME"
+                    AccessibilityHelper.logDebug("drag-diag: col\(c)[\(w)] \(name) frame=\(frame)")
+                }
+            }
+        } else {
+            for (r, row) in layout.rows.enumerated() {
+                for (w, cell) in row.windows.enumerated() {
+                    let name = cell.window.map { "\($0.ownerName) '\($0.title.prefix(20))'" }
+                        ?? "split(\(cell.nestedContainer?.children.count ?? 0))"
+                    let frame = layout.expectedFrames[cell.id].map(desc) ?? "NO FRAME"
+                    AccessibilityHelper.logDebug("drag-diag: row\(r)[\(w)] \(name) frame=\(frame)")
+                }
+            }
+        }
+        for tile in tiles {
+            AccessibilityHelper.logDebug(
+                "drag-diag: tile slot=(c\(tile.slot.columnIndex.map(String.init) ?? "-"),r\(tile.slot.rowIndex.map(String.init) ?? "-"),w\(tile.slot.windowIndex),n\(tile.slot.nestedIndex.map(String.init) ?? "-")) ax=\(desc(tile.frame)) screen=\(desc(convertFrameFromAXCoordinates(tile.frame)))"
+            )
+        }
+    }
+
     /// Every place a modifier-drag can drop on a live layout, derived from
     /// where the windows actually are — the same source the seam handles use.
     func dropTargets(for layout: MonitorLayout) -> [DesktopDropTarget] {
@@ -90,6 +134,8 @@ extension WindowManager {
                 addTiles(containerIndex: r, cells: row.windows.map { ($0.id, $0.window, $0.nestedContainer) })
             }
         }
+
+        logDropDiagnostics(for: layout, tiles: tiles, columnsMode: columnsMode)
 
         var targets = buildSeams(from: tiles, columnsMode: columnsMode).map {
             DesktopDropTarget(
