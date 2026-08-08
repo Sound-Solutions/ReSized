@@ -1701,7 +1701,18 @@ struct RowWindowTilePreview: View {
             if let window = rowWindow.window {
                 singleWindowView(window: window)
             } else if let container = rowWindow.nestedContainer {
-                NestedRowContainerPreview(container: container, rowIndex: rowIndex, windowIndex: windowIndex)
+                // Shared with columns mode. The rows-only version this replaced
+                // was a plain VStack of intrinsically-sized children, so a split
+                // rendered as a ~90pt huddle at the top of the cell with the rest
+                // left empty — and that empty area belonged to the row behind it,
+                // which is why drops there never reached the split.
+                NestedContainerPreview(
+                    container: container,
+                    columnIndex: nil,
+                    windowIndex: windowIndex,
+                    isInColumn: false,
+                    rowIndex: rowIndex
+                )
             }
         }
     }
@@ -2463,152 +2474,6 @@ struct ActiveNestedDivider: View {
                     NSCursor.pop()
                 }
             }
-    }
-}
-
-struct NestedRowContainerPreview: View {
-    let container: LayoutContainer
-    let rowIndex: Int
-    let windowIndex: Int
-    @EnvironmentObject var windowManager: WindowManager
-    @State private var isDropTarget = false
-
-    var body: some View {
-        VStack(spacing: 2) {
-            ForEach(Array(container.children.enumerated()), id: \.element.id) { idx, node in
-                switch node {
-                case .window(let windowNode):
-                    NestedRowWindowTile(
-                        window: windowNode.window,
-                        rowIndex: rowIndex,
-                        parentWindowIndex: windowIndex,
-                        nestedIndex: idx
-                    )
-                case .container(let nestedContainer):
-                    NestedRowContainerPreview(container: nestedContainer, rowIndex: rowIndex, windowIndex: windowIndex)
-                }
-            }
-
-            // Drop zone for adding more windows
-            NestedRowDropZone(rowIndex: rowIndex, windowIndex: windowIndex)
-        }
-        .padding(4)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(Color.accentColor, lineWidth: 2)
-                .opacity(isDropTarget ? 1 : 0)
-        )
-        // The whole split accepts drops, not just the 30pt dashed strip inside
-        // it — matching the columns variant, which has had this all along.
-        .contentShape(Rectangle())
-        .dropDestination(for: WindowDragData.self) { items, _ in
-            guard let dragData = items.first,
-                  let externalId = dragData.externalWindowId,
-                  let window = windowManager.availableWindows.first(where: { $0.id == externalId })
-            else { return false }
-
-            windowManager.addWindowToRowNested(
-                rowIndex: rowIndex,
-                windowIndex: windowIndex,
-                window: window
-            )
-            return true
-        } isTargeted: { targeted in
-            isDropTarget = targeted
-        }
-    }
-}
-
-struct NestedRowWindowTile: View {
-    let window: ExternalWindow
-    let rowIndex: Int
-    let parentWindowIndex: Int
-    let nestedIndex: Int
-    @EnvironmentObject var windowManager: WindowManager
-
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(window.ownerName)
-                    .font(.caption2)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
-                Text(window.title)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer()
-            Button {
-                windowManager.removeWindowFromRowNested(rowIndex: rowIndex, windowIndex: parentWindowIndex, nestedIndex: nestedIndex)
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(6)
-        .frame(maxWidth: .infinity)
-        .background(colorForApp(window.ownerName))
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-    }
-
-    private func colorForApp(_ name: String) -> Color {
-        let hue = windowManager.hueForApp(name)
-        return Color(hue: hue, saturation: 1.0, brightness: 0.5).opacity(0.5)
-    }
-}
-
-struct NestedRowDropZone: View {
-    let rowIndex: Int
-    let windowIndex: Int
-    @EnvironmentObject var windowManager: WindowManager
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: 4)
-            .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
-            .foregroundStyle(.secondary.opacity(0.5))
-            .frame(height: 30)
-            .overlay {
-                Text("Drop here")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            // strokeBorder only hit-tests the stroke itself, so without this the
-            // inside of the dashed box was not a drop target at all and the drop
-            // fell through to the whole-row destination behind it — which added a
-            // new top-level cell instead of putting the window in the split.
-            .contentShape(Rectangle())
-            .dropDestination(for: WindowDragData.self) { items, _ in
-                guard let dragData = items.first else { return false }
-
-                // Don't allow dropping the same window on itself
-                if dragData.sourceRow == rowIndex && dragData.sourceIndex == windowIndex {
-                    return false
-                }
-
-                if let externalId = dragData.externalWindowId {
-                    // From sidebar
-                    if let window = windowManager.availableWindows.first(where: { $0.id == externalId }) {
-                        windowManager.addWindowToRowNested(rowIndex: rowIndex, windowIndex: windowIndex, window: window)
-                        return true
-                    }
-                } else if let sourceRow = dragData.sourceRow, let sourceIndex = dragData.sourceIndex {
-                    // From another row position
-                    guard sourceRow < windowManager.rows.count,
-                          sourceIndex < windowManager.rows[sourceRow].windows.count,
-                          let window = windowManager.rows[sourceRow].windows[sourceIndex].window else {
-                        return false
-                    }
-                    windowManager.removeWindow(dragData.windowId, fromRow: sourceRow)
-                    windowManager.addWindowToRowNested(rowIndex: rowIndex, windowIndex: windowIndex, window: window)
-                    return true
-                }
-                return false
-            } isTargeted: { _ in }
     }
 }
 
