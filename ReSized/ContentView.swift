@@ -2,103 +2,228 @@ import SwiftUI
 import UniformTypeIdentifiers
 import ServiceManagement
 
-// MARK: - Drag and Drop Data
+// MARK: - Seams
 
-struct WindowDragData: Codable, Transferable {
-    let windowId: UUID
-    let sourceColumn: Int?  // nil if from sidebar
-    let sourceRow: Int?     // nil if from sidebar (rows mode)
-    let sourceIndex: Int?   // position within column/row
-    let externalWindowId: UUID?  // For sidebar items, the ExternalWindow.id
-    /// Which pane of a split this came from, when dragged out of one.
-    var sourceNestedIndex: Int? = nil
-
-    /// Where in the layout this drag started, or nil when it started in the
-    /// sidebar and so has no slot to vacate.
-    var sourceSlot: WindowSlot? {
-        guard externalWindowId == nil,
-              let sourceIndex,
-              sourceColumn != nil || sourceRow != nil
-        else { return nil }
-
-        return WindowSlot(
-            columnIndex: sourceColumn,
-            rowIndex: sourceRow,
-            windowIndex: sourceIndex,
-            nestedIndex: sourceNestedIndex
-        )
-    }
-
-    static var transferRepresentation: some TransferRepresentation {
-        CodableRepresentation(contentType: .json)
-    }
-}
-
-// MARK: - Cell Edge Drops
-
-/// What a drop landing at a particular point in a cell means.
-enum CellDropRegion {
-    /// Beside the cell, on the side its earlier neighbours are.
-    case before
-    /// Beside the cell, on the side its later neighbours are.
-    case after
-    /// Into the cell itself — swap with it, or join its split.
-    case inside
-}
-
-/// Where a drop landed relative to a cell's outer edges.
+/// Placeholder payload for a drag.
 ///
-/// A cell used to be all-or-nothing: the whole area meant "into this one", and
-/// the only way to say "beside it" was to miss every cell and hit the row
-/// behind them. Inside a split that is nearly impossible, which is why pulling
-/// a pane out into its own cell meant dragging almost clear of the box, and why
-/// a cell could not be moved past a split at all.
-///
-/// `touchesBefore`/`touchesAfter` say whether this view actually reaches the
-/// cell's outer edge. A pane in the middle of a horizontal split doesn't touch
-/// either, so all of it means "inside"; every pane of a vertical split spans
-/// the full width, so all of them touch both.
-func cellDropRegion(
-    at location: CGPoint,
-    in size: CGSize,
-    horizontal: Bool,
-    touchesBefore: Bool,
-    touchesAfter: Bool
-) -> CellDropRegion {
-    let extent = horizontal ? size.width : size.height
-    let position = horizontal ? location.x : location.y
-    guard extent > 0 else { return .inside }
+/// What is being dragged is recorded on WindowManager when the drag starts, so
+/// the payload itself carries nothing — it exists because AppKit needs an item
+/// to drag. Decoding a real payload asynchronously on drop bought nothing and
+/// meant the drop handler could not answer "where will this land" until after
+/// the mouse was released.
+let dragToken = "resized.window" as NSString
 
-    // Proportional so it scales with the preview, floored so it stays hittable
-    // in a narrow cell, and capped at a quarter so the middle keeps a clear
-    // majority — a cell with a strip on each side gives away twice whatever
-    // this is, and "into this cell" is the more common intent.
-    let strip = min(extent / 4, max(16, extent * 0.18))
+// MARK: - Seam Model
 
-    if touchesBefore, position < strip { return .before }
-    if touchesAfter, position > extent - strip { return .after }
-    return .inside
+/// A boundary a dragged window can be inserted at, and where to draw it.
+struct LayoutSeam: Equatable {
+    var destination: SeamDestination
+    /// Start of the line, in the grid's coordinate space.
+    var origin: CGPoint
+    var length: CGFloat
+    var isVertical: Bool
+
+    /// Distance from a point to the seam, treating it as a line segment rather
+    /// than an infinite line — otherwise a seam in a distant column looks close
+    /// whenever the cursor happens to share its x.
+    func distance(to point: CGPoint) -> CGFloat {
+        if isVertical {
+            let overshoot = max(origin.y - point.y, point.y - (origin.y + length), 0)
+            return hypot(point.x - origin.x, overshoot)
+        }
+        let overshoot = max(origin.x - point.x, point.x - (origin.x + length), 0)
+        return hypot(overshoot, point.y - origin.y)
+    }
 }
 
-/// Track a view's rendered size, for drop handlers that need to know where in
-/// the view a drop landed relative to its own extent.
-private struct MeasureSize: ViewModifier {
-    @Binding var size: CGSize
+/// A tile's position, published so the grid can derive seams from where things
+/// actually are rather than recomputing the layout maths a second time and
+/// hoping the two agree.
+struct TileFrame: Equatable {
+    /// `nestedIndex` nil for a cell, set for a pane inside a split.
+    var slot: WindowSlot
+    var frame: CGRect
+    /// Set on panes, so their seams get the right orientation.
+    var splitDirection: SplitDirection?
+}
 
-    func body(content: Content) -> some View {
-        content.background(
+struct TileFramesKey: PreferenceKey {
+    static let defaultValue: [TileFrame] = []
+    static func reduce(value: inout [TileFrame], nextValue: () -> [TileFrame]) {
+        value += nextValue()
+    }
+}
+
+extension View {
+    /// Report this tile's frame to the grid.
+    func reportTileFrame(_ slot: WindowSlot, splitDirection: SplitDirection? = nil) -> some View {
+        background(
             GeometryReader { proxy in
-                Color.clear
-                    .onAppear { size = proxy.size }
-                    .onChange(of: proxy.size) { _, new in size = new }
+                Color.clear.preference(
+                    key: TileFramesKey.self,
+                    value: [TileFrame(
+                        slot: slot,
+                        frame: proxy.frame(in: .named(LayoutPreview.gridSpace)),
+                        splitDirection: splitDirection
+                    )]
+                )
             }
         )
     }
 }
 
-extension View {
-    func measureSize(into size: Binding<CGSize>) -> some View {
-        modifier(MeasureSize(size: size))
+/// Every place a window could be dropped, derived from where the tiles are.
+///
+/// A column or row of n cells has n+1 seams: before the first, between each
+/// pair, and after the last. A split's panes have the same, turned whichever
+/// way the split is. Dropping is then just "which of these is nearest", with no
+/// regions to land in or miss.
+func buildSeams(from tiles: [TileFrame], columnsMode: Bool) -> [LayoutSeam] {
+    var seams: [LayoutSeam] = []
+
+    // Cells, grouped by the column or row holding them.
+    let cells = tiles.filter { $0.slot.nestedIndex == nil }
+    let cellGroups = Dictionary(grouping: cells) { columnsMode ? $0.slot.columnIndex : $0.slot.rowIndex }
+
+    for (containerIndex, group) in cellGroups {
+        guard let containerIndex else { continue }
+        let ordered = group.sorted { $0.slot.windowIndex < $1.slot.windowIndex }
+        guard let first = ordered.first, let last = ordered.last else { continue }
+
+        func destination(_ index: Int) -> SeamDestination {
+            .cell(columnIndex: columnsMode ? containerIndex : nil,
+                  rowIndex: columnsMode ? nil : containerIndex,
+                  index: index)
+        }
+
+        if columnsMode {
+            // Cells stack down a column, so the seams between them run across.
+            let x = ordered.map(\.frame.minX).min() ?? first.frame.minX
+            let width = (ordered.map(\.frame.maxX).max() ?? first.frame.maxX) - x
+            for tile in ordered {
+                seams.append(LayoutSeam(destination: destination(tile.slot.windowIndex),
+                                        origin: CGPoint(x: x, y: tile.frame.minY),
+                                        length: width, isVertical: false))
+            }
+            seams.append(LayoutSeam(destination: destination(last.slot.windowIndex + 1),
+                                    origin: CGPoint(x: x, y: last.frame.maxY),
+                                    length: width, isVertical: false))
+        } else {
+            // Cells run across a row, so the seams between them run down.
+            let y = ordered.map(\.frame.minY).min() ?? first.frame.minY
+            let height = (ordered.map(\.frame.maxY).max() ?? first.frame.maxY) - y
+            for tile in ordered {
+                seams.append(LayoutSeam(destination: destination(tile.slot.windowIndex),
+                                        origin: CGPoint(x: tile.frame.minX, y: y),
+                                        length: height, isVertical: true))
+            }
+            seams.append(LayoutSeam(destination: destination(last.slot.windowIndex + 1),
+                                    origin: CGPoint(x: last.frame.maxX, y: y),
+                                    length: height, isVertical: true))
+        }
+    }
+
+    // Panes, grouped by the cell whose split holds them.
+    let paneGroups = Dictionary(grouping: tiles.filter { $0.slot.nestedIndex != nil }) { $0.slot.cell }
+
+    for (cellSlot, group) in paneGroups {
+        let ordered = group.sorted { ($0.slot.nestedIndex ?? 0) < ($1.slot.nestedIndex ?? 0) }
+        guard let first = ordered.first, let last = ordered.last,
+              let direction = first.splitDirection else { continue }
+
+        func destination(_ index: Int) -> SeamDestination { .pane(cell: cellSlot, index: index) }
+
+        if direction == .horizontal {
+            let y = ordered.map(\.frame.minY).min() ?? first.frame.minY
+            let height = (ordered.map(\.frame.maxY).max() ?? first.frame.maxY) - y
+            for tile in ordered {
+                seams.append(LayoutSeam(destination: destination(tile.slot.nestedIndex ?? 0),
+                                        origin: CGPoint(x: tile.frame.minX, y: y),
+                                        length: height, isVertical: true))
+            }
+            seams.append(LayoutSeam(destination: destination((last.slot.nestedIndex ?? 0) + 1),
+                                    origin: CGPoint(x: last.frame.maxX, y: y),
+                                    length: height, isVertical: true))
+        } else {
+            let x = ordered.map(\.frame.minX).min() ?? first.frame.minX
+            let width = (ordered.map(\.frame.maxX).max() ?? first.frame.maxX) - x
+            for tile in ordered {
+                seams.append(LayoutSeam(destination: destination(tile.slot.nestedIndex ?? 0),
+                                        origin: CGPoint(x: x, y: tile.frame.minY),
+                                        length: width, isVertical: false))
+            }
+            seams.append(LayoutSeam(destination: destination((last.slot.nestedIndex ?? 0) + 1),
+                                    origin: CGPoint(x: x, y: last.frame.maxY),
+                                    length: width, isVertical: false))
+        }
+    }
+
+    return seams
+}
+
+/// One drop handler for the whole grid.
+///
+/// Every tile used to carry its own, which meant a drop landed on whichever
+/// view happened to win hit-testing and each had to guess what the user meant
+/// from where inside itself the drop fell. There is now a single target, a
+/// single question — which seam is nearest — and an answer visible on screen
+/// before the mouse is released.
+struct SeamDropDelegate: DropDelegate {
+    let seams: [LayoutSeam]
+    let windowManager: WindowManager
+    @Binding var highlighted: LayoutSeam?
+
+    func validateDrop(info: DropInfo) -> Bool {
+        windowManager.pendingDrag != nil
+    }
+
+    func dropEntered(info: DropInfo) {
+        highlighted = nearestSeam(to: info.location)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        highlighted = nearestSeam(to: info.location)
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        highlighted = nil
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        defer {
+            highlighted = nil
+            windowManager.pendingDrag = nil
+        }
+        guard let drag = windowManager.pendingDrag,
+              let seam = nearestSeam(to: info.location) else { return false }
+
+        windowManager.place(drag, at: seam.destination)
+        return true
+    }
+
+    private func nearestSeam(to point: CGPoint) -> LayoutSeam? {
+        seams.min { $0.distance(to: point) < $1.distance(to: point) }
+    }
+}
+
+/// The line showing where the window will land.
+struct SeamHighlight: View {
+    let seam: LayoutSeam
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(Color.accentColor)
+            .frame(
+                width: seam.isVertical ? 4 : seam.length,
+                height: seam.isVertical ? seam.length : 4
+            )
+            .position(
+                x: seam.origin.x + (seam.isVertical ? 0 : seam.length / 2),
+                y: seam.origin.y + (seam.isVertical ? seam.length / 2 : 0)
+            )
+            .shadow(color: .accentColor.opacity(0.6), radius: 4)
+            .allowsHitTesting(false)
     }
 }
 
@@ -907,10 +1032,39 @@ struct ConfigureLayoutView: View {
 }
 
 struct LayoutPreview: View {
+    /// Shared coordinate space for tile frames, seams and the drop location, so
+    /// all three are directly comparable.
+    static let gridSpace = "ReSizedGrid"
+
     @Environment(WindowManager.self) private var windowManager
     @Binding var selectedIndex: Int
+    @State private var tileFrames: [TileFrame] = []
+    @State private var highlightedSeam: LayoutSeam?
+
+    private var seams: [LayoutSeam] {
+        buildSeams(from: tileFrames, columnsMode: windowManager.layoutMode == .columns)
+    }
 
     var body: some View {
+        grid
+            .coordinateSpace(name: Self.gridSpace)
+            .onPreferenceChange(TileFramesKey.self) { tileFrames = $0 }
+            .overlay {
+                if let highlightedSeam {
+                    SeamHighlight(seam: highlightedSeam)
+                }
+            }
+            .onDrop(
+                of: [.plainText],
+                delegate: SeamDropDelegate(
+                    seams: seams,
+                    windowManager: windowManager,
+                    highlighted: $highlightedSeam
+                )
+            )
+    }
+
+    private var grid: some View {
         GeometryReader { geometry in
             if windowManager.layoutMode == .columns {
                 // Columns mode: horizontal arrangement
@@ -1078,30 +1232,10 @@ struct ColumnPreview: View {
             }
         }
         .frame(width: max(60, ((containerSize.width - 32) - CGFloat(totalColumns - 1) * 8) * column.widthProportion))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(Color.accentColor, lineWidth: 3)
-                .opacity(isDropTarget ? 1 : 0)
-        )
-        .dropDestination(for: WindowDragData.self) { items, location in
-            guard let dragData = items.first else { return false }
-            // Calculate drop index based on Y position
-            let dropIndex = calculateDropIndex(at: location.y, windowCount: column.windows.count)
-            windowManager.handleColumnDrop(dragData: dragData, targetColumn: columnIndex, atIndex: dropIndex)
-            return true
-        } isTargeted: { isTargeted in
-            isDropTarget = isTargeted
-        }
-    }
-
-    private func calculateDropIndex(at yPosition: CGFloat, windowCount: Int) -> Int {
-        guard windowCount > 0 else { return 0 }
-        // Estimate position based on equal distribution (header is ~32px)
-        let contentHeight = containerSize.height - 40
-        let windowHeight = contentHeight / CGFloat(windowCount)
-        let adjustedY = yPosition - 32 // Account for header
-        let index = Int(adjustedY / windowHeight)
-        return max(0, min(index, windowCount))
+        // Drops are handled once, by the grid — see SeamDropDelegate. The
+        // column used to catch them itself and then guess a position by
+        // dividing its height evenly, which put windows in the wrong slot the
+        // moment its cells weren't all the same size.
     }
 }
 
@@ -1112,8 +1246,6 @@ struct WindowTilePreview: View {
     let heightProportion: CGFloat
     @Environment(WindowManager.self) private var windowManager
     @State private var isHovered = false
-    @State private var tileSize: CGSize = .zero
-    @State private var isDropTarget = false
 
     private var slot: WindowSlot {
         WindowSlot(columnIndex: columnIndex, rowIndex: nil, windowIndex: windowIndex, nestedIndex: nil)
@@ -1122,37 +1254,7 @@ struct WindowTilePreview: View {
     var body: some View {
         Group {
             if let window = columnWindow.window {
-                // Single window view. A plain cell used to be no drop target at
-                // all — drops fell through to the column, which placed them by
-                // dividing its height evenly and guessing an index, so unequal
-                // cells landed in the wrong slot.
                 singleWindowView(window: window)
-                    .measureSize(into: $tileSize)
-                    .contentShape(Rectangle())
-                    .dropDestination(for: WindowDragData.self) { items, location in
-                        guard let source = items.first?.sourceSlot else { return false }
-
-                        switch cellDropRegion(
-                            at: location, in: tileSize, horizontal: false,
-                            touchesBefore: true, touchesAfter: true
-                        ) {
-                        case .before:
-                            windowManager.moveWindow(from: source, insertingAt: windowIndex,
-                                                     columnIndex: columnIndex, rowIndex: nil)
-                        case .after:
-                            windowManager.moveWindow(from: source, insertingAt: windowIndex + 1,
-                                                     columnIndex: columnIndex, rowIndex: nil)
-                        case .inside:
-                            guard source != slot else { return false }
-                            windowManager.swapWindows(source, slot)
-                        }
-                        return true
-                    } isTargeted: { isDropTarget = $0 }
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .strokeBorder(Color.accentColor, lineWidth: 2)
-                            .opacity(isDropTarget ? 1 : 0)
-                    )
             } else if let container = columnWindow.nestedContainer {
                 // Nested container view
                 NestedContainerPreview(
@@ -1163,6 +1265,7 @@ struct WindowTilePreview: View {
                 )
             }
         }
+        .reportTileFrame(slot)
     }
 
     @ViewBuilder
@@ -1212,13 +1315,10 @@ struct WindowTilePreview: View {
         .onHover { hovering in
             isHovered = hovering
         }
-        .draggable(WindowDragData(
-            windowId: columnWindow.id,
-            sourceColumn: columnIndex,
-            sourceRow: nil,
-            sourceIndex: windowIndex,
-            externalWindowId: nil
-        ))
+        .onDrag {
+            windowManager.pendingDrag = .placed(slot)
+            return NSItemProvider(object: dragToken)
+        }
     }
 
     private func colorForApp(_ name: String) -> Color {
@@ -1258,23 +1358,8 @@ struct NestedContainerPreview: View {
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(isDropTarget ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: isDropTarget ? 2 : 1)
+                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
         )
-        .dropDestination(for: WindowDragData.self) { items, _ in
-            guard let dragData = items.first else { return false }
-            handleNestedDrop(dragData: dragData)
-            return true
-        } isTargeted: { isTargeted in
-            isDropTarget = isTargeted
-        }
-    }
-
-    /// Whether the split's panes are laid out along the same axis the cell's
-    /// neighbours are. When they are, only the first and last pane reach the
-    /// cell's outer edges; when they aren't, every pane spans the cell and so
-    /// touches both.
-    private var splitRunsAlongCellAxis: Bool {
-        (container.direction == .horizontal) == !isInColumn
     }
 
     @ViewBuilder
@@ -1291,13 +1376,7 @@ struct NestedContainerPreview: View {
                 rowIndex: rowIndex,
                 windowIndex: windowIndex,
                 isInColumn: isInColumn,
-                paneSize: childSize,
-                touchesBefore: splitRunsAlongCellAxis ? index == 0 : true,
-                // The drop zone, when present, sits after the last pane and
-                // takes the trailing edge with it.
-                touchesAfter: splitRunsAlongCellAxis
-                    ? (index == container.children.count - 1 && container.children.count > 1)
-                    : true
+                splitDirection: container.direction
             )
             .frame(width: childSize.width, height: childSize.height)
 
@@ -1315,33 +1394,20 @@ struct NestedContainerPreview: View {
             }
         }
 
-        // Show drop zone only when there's exactly 1 child (after initial split)
+        // The empty half a fresh split leaves behind. Purely an affordance now:
+        // it shows the space is waiting to be filled, and the seam running
+        // along its edge is what a drop actually lands on.
         if container.children.count == 1 {
-            let zoneSize = CGSize(
-                width: container.direction == .horizontal ? size.width * 0.5 : size.width,
-                height: container.direction == .vertical ? size.height * 0.5 : size.height
-            )
-
             NestedDropZone(
                 columnIndex: columnIndex,
                 rowIndex: rowIndex,
                 windowIndex: windowIndex,
                 isInColumn: isInColumn
             )
-            .frame(width: zoneSize.width, height: zoneSize.height)
-        }
-    }
-
-    private func handleNestedDrop(dragData: WindowDragData) {
-
-        // Dragging from sidebar
-        if let externalWindowId = dragData.externalWindowId,
-           let window = windowManager.availableWindows.first(where: { $0.id == externalWindowId }) {
-            if isInColumn, let colIndex = columnIndex {
-                windowManager.addWindowToColumnNested(columnIndex: colIndex, windowIndex: windowIndex, window: window)
-            } else if let rIndex = rowIndex {
-                windowManager.addWindowToRowNested(rowIndex: rIndex, windowIndex: windowIndex, window: window)
-            }
+                .frame(
+                    width: container.direction == .horizontal ? size.width * 0.5 : size.width,
+                    height: container.direction == .vertical ? size.height * 0.5 : size.height
+                )
         }
     }
 }
@@ -1354,18 +1420,9 @@ struct NestedWindowTile: View {
     let rowIndex: Int?
     let windowIndex: Int
     let isInColumn: Bool
-    /// The pane's own size, and whether it reaches the outer edges of the cell.
-    /// Together these decide whether a drop means "swap with this pane" or
-    /// "put it beside the whole cell" — see cellDropRegion.
-    let paneSize: CGSize
-    let touchesBefore: Bool
-    let touchesAfter: Bool
+    /// Which way the split runs, so the grid can orient this pane's seams.
+    let splitDirection: SplitDirection
     @Environment(WindowManager.self) private var windowManager
-    @State private var isDropTarget = false
-
-    /// The axis the cell's neighbours lie on: across in rows mode, down in
-    /// columns mode.
-    private var cellAxisHorizontal: Bool { !isInColumn }
 
     private var slot: WindowSlot {
         WindowSlot(
@@ -1409,48 +1466,10 @@ struct NestedWindowTile: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(colorForApp(windowNode.window.ownerName))
         .clipShape(RoundedRectangle(cornerRadius: 4))
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .strokeBorder(Color.accentColor, lineWidth: 2)
-                .opacity(isDropTarget ? 1 : 0)
-        )
-        .draggable(WindowDragData(
-            windowId: windowNode.window.id,
-            sourceColumn: columnIndex,
-            sourceRow: rowIndex,
-            sourceIndex: windowIndex,
-            externalWindowId: nil,
-            sourceNestedIndex: nestedIndex
-        ))
-        .contentShape(Rectangle())
-        .dropDestination(for: WindowDragData.self) { items, location in
-            // Near the cell's outer edge this means "beside the whole split";
-            // anywhere else it means "trade places with this pane" — which
-            // works against another pane of this split, a pane of some other
-            // split, or a plain cell elsewhere. Sidebar drags carry no source
-            // slot and belong to the split behind this pane.
-            guard let drag = items.first, let source = drag.sourceSlot else { return false }
-
-            switch cellDropRegion(
-                at: location,
-                in: paneSize,
-                horizontal: cellAxisHorizontal,
-                touchesBefore: touchesBefore,
-                touchesAfter: touchesAfter
-            ) {
-            case .before:
-                windowManager.moveWindow(from: source, insertingAt: windowIndex,
-                                         columnIndex: columnIndex, rowIndex: rowIndex)
-            case .after:
-                windowManager.moveWindow(from: source, insertingAt: windowIndex + 1,
-                                         columnIndex: columnIndex, rowIndex: rowIndex)
-            case .inside:
-                guard source != slot else { return false }
-                windowManager.swapWindows(source, slot)
-            }
-            return true
-        } isTargeted: { targeted in
-            isDropTarget = targeted
+        .reportTileFrame(slot, splitDirection: splitDirection)
+        .onDrag {
+            windowManager.pendingDrag = .placed(slot)
+            return NSItemProvider(object: dragToken)
         }
     }
 
@@ -1554,19 +1573,18 @@ struct NestedDividerHandle: View {
     }
 }
 
-/// Drop zone for adding windows to a nested container
+/// The empty half a fresh split leaves behind.
+///
+/// It shows the space is waiting to be filled and offers a way to undo the
+/// split. It is no longer a drop target: dropping is the grid's job, and this
+/// box carrying its own handler is what made a drop mean different things in
+/// different places.
 struct NestedDropZone: View {
     let columnIndex: Int?
     let rowIndex: Int?
     let windowIndex: Int
     let isInColumn: Bool
     @Environment(WindowManager.self) private var windowManager
-    @State private var isDropTarget = false
-
-    /// The cell holding the split this zone adds to.
-    private var slot: WindowSlot {
-        WindowSlot(columnIndex: columnIndex, rowIndex: rowIndex, windowIndex: windowIndex, nestedIndex: nil)
-    }
 
     var body: some View {
         VStack {
@@ -1576,7 +1594,7 @@ struct NestedDropZone: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .frame(minWidth: 30, minHeight: 30)
-        .background(isDropTarget ? Color.accentColor.opacity(0.2) : Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
         .clipShape(RoundedRectangle(cornerRadius: 4))
         // Undo the split. Lives in the empty half rather than over the pane, so
         // it cannot be mistaken for the button that removes the window itself.
@@ -1599,43 +1617,8 @@ struct NestedDropZone: View {
         .overlay(
             RoundedRectangle(cornerRadius: 4)
                 .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
-                .foregroundStyle(isDropTarget ? Color.accentColor : Color(nsColor: .separatorColor))
+                .foregroundStyle(Color(nsColor: .separatorColor))
         )
-        // The zone is a dashed outline, and a stroked shape's hit region is the
-        // stroke itself — its interior is transparent to hit-testing. Without an
-        // explicit shape, drops in the middle of the box fell straight through to
-        // the row behind it, which then reordered cells instead of filling the
-        // split. Verified from a drop logged at a point provably inside the box
-        // that the row, not the zone, received.
-        .contentShape(Rectangle())
-        .dropDestination(for: WindowDragData.self) { items, location in
-            guard let dragData = items.first else { return false }
-
-            // Dragging from sidebar
-            if let externalWindowId = dragData.externalWindowId,
-               let window = windowManager.availableWindows.first(where: { $0.id == externalWindowId }) {
-                if isInColumn, let colIndex = columnIndex {
-                    windowManager.addWindowToColumnNested(columnIndex: colIndex, windowIndex: windowIndex, window: window)
-                } else if let rIndex = rowIndex {
-                    windowManager.addWindowToRowNested(rowIndex: rIndex, windowIndex: windowIndex, window: window)
-                }
-                return true
-            }
-
-            // Anything already placed: a plain cell from another column or row,
-            // or a pane lifted out of some other split.
-            //
-            // Every point in this box means "join the split" — no edge strips.
-            // The box exists for exactly one purpose, so there is no competing
-            // meaning to disambiguate, and carving insertion strips out of it
-            // only made its declared job unreliable near its own borders.
-            // Panes and plain tiles carry the edge strips instead.
-            guard let source = dragData.sourceSlot else { return false }
-            windowManager.moveWindow(from: source, intoSplitAt: slot)
-            return true
-        } isTargeted: { isTargeted in
-            isDropTarget = isTargeted
-        }
     }
 }
 
@@ -1862,29 +1845,7 @@ struct RowPreview: View {
             }
         }
         .frame(height: max(60, ((containerSize.height - 32) - CGFloat(totalRows - 1) * 8) * row.heightProportion))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(Color.accentColor, lineWidth: 3)
-                .opacity(isDropTarget ? 1 : 0)
-        )
-        .dropDestination(for: WindowDragData.self) { items, location in
-            guard let dragData = items.first else { return false }
-            // Calculate drop index based on X position
-            let dropIndex = calculateDropIndex(at: location.x, windowCount: row.windows.count)
-            windowManager.handleRowDrop(dragData: dragData, targetRow: rowIndex, atIndex: dropIndex)
-            return true
-        } isTargeted: { isTargeted in
-            isDropTarget = isTargeted
-        }
-    }
-
-    private func calculateDropIndex(at xPosition: CGFloat, windowCount: Int) -> Int {
-        guard windowCount > 0 else { return 0 }
-        // Estimate position based on equal distribution
-        let contentWidth = containerSize.width - 40
-        let windowWidth = contentWidth / CGFloat(windowCount)
-        let index = Int(xPosition / windowWidth)
-        return max(0, min(index, windowCount))
+        // Drops belong to the grid — see the columns equivalent.
     }
 }
 
@@ -1895,8 +1856,6 @@ struct RowWindowTilePreview: View {
     let widthProportion: CGFloat
     @Environment(WindowManager.self) private var windowManager
     @State private var isHovered = false
-    @State private var tileSize: CGSize = .zero
-    @State private var isDropTarget = false
 
     private var slot: WindowSlot {
         WindowSlot(columnIndex: nil, rowIndex: rowIndex, windowIndex: windowIndex, nestedIndex: nil)
@@ -1905,35 +1864,7 @@ struct RowWindowTilePreview: View {
     var body: some View {
         Group {
             if let window = rowWindow.window {
-                // See the columns equivalent: the edges mean "beside this
-                // cell", the middle means "trade places with it".
                 singleWindowView(window: window)
-                    .measureSize(into: $tileSize)
-                    .contentShape(Rectangle())
-                    .dropDestination(for: WindowDragData.self) { items, location in
-                        guard let source = items.first?.sourceSlot else { return false }
-
-                        switch cellDropRegion(
-                            at: location, in: tileSize, horizontal: true,
-                            touchesBefore: true, touchesAfter: true
-                        ) {
-                        case .before:
-                            windowManager.moveWindow(from: source, insertingAt: windowIndex,
-                                                     columnIndex: nil, rowIndex: rowIndex)
-                        case .after:
-                            windowManager.moveWindow(from: source, insertingAt: windowIndex + 1,
-                                                     columnIndex: nil, rowIndex: rowIndex)
-                        case .inside:
-                            guard source != slot else { return false }
-                            windowManager.swapWindows(source, slot)
-                        }
-                        return true
-                    } isTargeted: { isDropTarget = $0 }
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .strokeBorder(Color.accentColor, lineWidth: 2)
-                            .opacity(isDropTarget ? 1 : 0)
-                    )
             } else if let container = rowWindow.nestedContainer {
                 // Shared with columns mode. The rows-only version this replaced
                 // was a plain VStack of intrinsically-sized children, so a split
@@ -1949,6 +1880,7 @@ struct RowWindowTilePreview: View {
                 )
             }
         }
+        .reportTileFrame(slot)
     }
 
     @ViewBuilder
@@ -1980,13 +1912,10 @@ struct RowWindowTilePreview: View {
             .padding(8)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(colorForApp(window.ownerName))
-            .draggable(WindowDragData(
-                windowId: rowWindow.id,
-                sourceColumn: nil,
-                sourceRow: rowIndex,
-                sourceIndex: windowIndex,
-                externalWindowId: nil
-            ))
+            .onDrag {
+                windowManager.pendingDrag = .placed(slot)
+                return NSItemProvider(object: dragToken)
+            }
 
             // Split button (vertical split to add sub-rows)
             if isHovered {
@@ -2322,13 +2251,10 @@ struct AvailableWindowRow: View {
                 RoundedRectangle(cornerRadius: 8)
                     .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
             )
-            .draggable(WindowDragData(
-                windowId: UUID(),  // Placeholder, not used for sidebar
-                sourceColumn: nil,
-                sourceRow: nil,
-                sourceIndex: nil,
-                externalWindowId: window.id
-            ))
+            .onDrag {
+                windowManager.pendingDrag = .available(window.id)
+                return NSItemProvider(object: dragToken)
+            }
         }
         .buttonStyle(.plain)
     }
