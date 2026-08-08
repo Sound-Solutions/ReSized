@@ -1054,6 +1054,7 @@ struct WindowTilePreview: View {
                 // Nested container view
                 NestedContainerPreview(
                     container: container,
+                    cellId: columnWindow.id,
                     columnIndex: columnIndex,
                     windowIndex: windowIndex,
                     isInColumn: true
@@ -1129,12 +1130,16 @@ struct WindowTilePreview: View {
 /// Preview for a nested container within a column or row cell
 struct NestedContainerPreview: View {
     let container: LayoutContainer
+    /// The cell holding this split, so it can remove itself. Panes have their
+    /// own close buttons; this is the one that removes the split as a whole.
+    let cellId: UUID
     let columnIndex: Int?
     let windowIndex: Int
     let isInColumn: Bool
     var rowIndex: Int? = nil
     @Environment(WindowManager.self) private var windowManager
     @State private var isDropTarget = false
+    @State private var isHovered = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -1157,12 +1162,41 @@ struct NestedContainerPreview: View {
             RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(isDropTarget ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: isDropTarget ? 2 : 1)
         )
+        // Removing the split itself, as opposed to one of its panes. Sits above
+        // the panes rather than in a header, so the preview keeps showing the
+        // split at the size it will actually occupy.
+        .overlay(alignment: .topTrailing) {
+            if isHovered {
+                Button(action: removeSplit) {
+                    Image(systemName: "xmark.circle.fill")
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, .black.opacity(0.65))
+                        .font(.body)
+                }
+                .buttonStyle(.plain)
+                .padding(6)
+                .help("Remove this split")
+            }
+        }
+        .onHover { hovering in
+            isHovered = hovering
+        }
         .dropDestination(for: WindowDragData.self) { items, _ in
             guard let dragData = items.first else { return false }
             handleNestedDrop(dragData: dragData)
             return true
         } isTargeted: { isTargeted in
             isDropTarget = isTargeted
+        }
+    }
+
+    /// Drop the whole split and everything in it. The windows aren't destroyed —
+    /// they go back to Available Windows, same as closing a plain tile.
+    private func removeSplit() {
+        if isInColumn, let columnIndex {
+            windowManager.removeWindow(cellId, fromColumn: columnIndex)
+        } else if let rowIndex {
+            windowManager.removeWindow(cellId, fromRow: rowIndex)
         }
     }
 
@@ -1734,6 +1768,7 @@ struct RowWindowTilePreview: View {
                 // which is why drops there never reached the split.
                 NestedContainerPreview(
                     container: container,
+                    cellId: rowWindow.id,
                     columnIndex: nil,
                     windowIndex: windowIndex,
                     isInColumn: false,
