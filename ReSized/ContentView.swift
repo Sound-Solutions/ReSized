@@ -34,6 +34,73 @@ struct WindowDragData: Codable, Transferable {
     }
 }
 
+// MARK: - Cell Edge Drops
+
+/// What a drop landing at a particular point in a cell means.
+enum CellDropRegion {
+    /// Beside the cell, on the side its earlier neighbours are.
+    case before
+    /// Beside the cell, on the side its later neighbours are.
+    case after
+    /// Into the cell itself — swap with it, or join its split.
+    case inside
+}
+
+/// Where a drop landed relative to a cell's outer edges.
+///
+/// A cell used to be all-or-nothing: the whole area meant "into this one", and
+/// the only way to say "beside it" was to miss every cell and hit the row
+/// behind them. Inside a split that is nearly impossible, which is why pulling
+/// a pane out into its own cell meant dragging almost clear of the box, and why
+/// a cell could not be moved past a split at all.
+///
+/// `touchesBefore`/`touchesAfter` say whether this view actually reaches the
+/// cell's outer edge. A pane in the middle of a horizontal split doesn't touch
+/// either, so all of it means "inside"; every pane of a vertical split spans
+/// the full width, so all of them touch both.
+func cellDropRegion(
+    at location: CGPoint,
+    in size: CGSize,
+    horizontal: Bool,
+    touchesBefore: Bool,
+    touchesAfter: Bool
+) -> CellDropRegion {
+    let extent = horizontal ? size.width : size.height
+    let position = horizontal ? location.x : location.y
+    guard extent > 0 else { return .inside }
+
+    // Proportional so it scales with the preview, floored so it stays hittable
+    // in a narrow cell, and capped at a third so the middle always wins the
+    // majority of the area.
+    let strip = min(extent / 3, max(18, extent * 0.22))
+
+    if touchesBefore, position < strip { return .before }
+    if touchesAfter, position > extent - strip { return .after }
+    return .inside
+}
+
+/// Track a view's rendered size, for drop handlers that need to know where in
+/// the view a drop landed relative to its own extent.
+private struct MeasureSize: ViewModifier {
+    @Binding var size: CGSize
+
+    func body(content: Content) -> some View {
+        content.background(
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { size = proxy.size }
+                    .onChange(of: proxy.size) { _, new in size = new }
+            }
+        )
+    }
+}
+
+extension View {
+    func measureSize(into size: Binding<CGSize>) -> some View {
+        modifier(MeasureSize(size: size))
+    }
+}
+
 // MARK: - Permission Overlay (First Launch)
 
 struct PermissionOverlay: View {
@@ -1044,12 +1111,47 @@ struct WindowTilePreview: View {
     let heightProportion: CGFloat
     @Environment(WindowManager.self) private var windowManager
     @State private var isHovered = false
+    @State private var tileSize: CGSize = .zero
+    @State private var isDropTarget = false
+
+    private var slot: WindowSlot {
+        WindowSlot(columnIndex: columnIndex, rowIndex: nil, windowIndex: windowIndex, nestedIndex: nil)
+    }
 
     var body: some View {
         Group {
             if let window = columnWindow.window {
-                // Single window view
+                // Single window view. A plain cell used to be no drop target at
+                // all — drops fell through to the column, which placed them by
+                // dividing its height evenly and guessing an index, so unequal
+                // cells landed in the wrong slot.
                 singleWindowView(window: window)
+                    .measureSize(into: $tileSize)
+                    .contentShape(Rectangle())
+                    .dropDestination(for: WindowDragData.self) { items, location in
+                        guard let source = items.first?.sourceSlot else { return false }
+
+                        switch cellDropRegion(
+                            at: location, in: tileSize, horizontal: false,
+                            touchesBefore: true, touchesAfter: true
+                        ) {
+                        case .before:
+                            windowManager.moveWindow(from: source, insertingAt: windowIndex,
+                                                     columnIndex: columnIndex, rowIndex: nil)
+                        case .after:
+                            windowManager.moveWindow(from: source, insertingAt: windowIndex + 1,
+                                                     columnIndex: columnIndex, rowIndex: nil)
+                        case .inside:
+                            guard source != slot else { return false }
+                            windowManager.swapWindows(source, slot)
+                        }
+                        return true
+                    } isTargeted: { isDropTarget = $0 }
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(Color.accentColor, lineWidth: 2)
+                            .opacity(isDropTarget ? 1 : 0)
+                    )
             } else if let container = columnWindow.nestedContainer {
                 // Nested container view
                 NestedContainerPreview(
@@ -1166,6 +1268,14 @@ struct NestedContainerPreview: View {
         }
     }
 
+    /// Whether the split's panes are laid out along the same axis the cell's
+    /// neighbours are. When they are, only the first and last pane reach the
+    /// cell's outer edges; when they aren't, every pane spans the cell and so
+    /// touches both.
+    private var splitRunsAlongCellAxis: Bool {
+        (container.direction == .horizontal) == !isInColumn
+    }
+
     @ViewBuilder
     private func nestedChildrenView(size: CGSize) -> some View {
         ForEach(Array(container.children.enumerated()), id: \.element.id) { index, child in
@@ -1179,7 +1289,14 @@ struct NestedContainerPreview: View {
                 columnIndex: columnIndex,
                 rowIndex: rowIndex,
                 windowIndex: windowIndex,
-                isInColumn: isInColumn
+                isInColumn: isInColumn,
+                paneSize: childSize,
+                touchesBefore: splitRunsAlongCellAxis ? index == 0 : true,
+                // The drop zone, when present, sits after the last pane and
+                // takes the trailing edge with it.
+                touchesAfter: splitRunsAlongCellAxis
+                    ? (index == container.children.count - 1 && container.children.count > 1)
+                    : true
             )
             .frame(width: childSize.width, height: childSize.height)
 
@@ -1199,16 +1316,24 @@ struct NestedContainerPreview: View {
 
         // Show drop zone only when there's exactly 1 child (after initial split)
         if container.children.count == 1 {
+            let zoneSize = CGSize(
+                width: container.direction == .horizontal ? size.width * 0.5 : size.width,
+                height: container.direction == .vertical ? size.height * 0.5 : size.height
+            )
+
             NestedDropZone(
                 columnIndex: columnIndex,
                 rowIndex: rowIndex,
                 windowIndex: windowIndex,
-                isInColumn: isInColumn
+                isInColumn: isInColumn,
+                zoneSize: zoneSize,
+                // The zone is last, so it holds the trailing edge and never the
+                // leading one — unless the split runs across the cell axis, in
+                // which case it spans the cell and touches both.
+                touchesBefore: !splitRunsAlongCellAxis,
+                touchesAfter: true
             )
-            .frame(
-                width: container.direction == .horizontal ? size.width * 0.5 : size.width,
-                height: container.direction == .vertical ? size.height * 0.5 : size.height
-            )
+            .frame(width: zoneSize.width, height: zoneSize.height)
         }
     }
 
@@ -1234,8 +1359,18 @@ struct NestedWindowTile: View {
     let rowIndex: Int?
     let windowIndex: Int
     let isInColumn: Bool
+    /// The pane's own size, and whether it reaches the outer edges of the cell.
+    /// Together these decide whether a drop means "swap with this pane" or
+    /// "put it beside the whole cell" — see cellDropRegion.
+    let paneSize: CGSize
+    let touchesBefore: Bool
+    let touchesAfter: Bool
     @Environment(WindowManager.self) private var windowManager
     @State private var isDropTarget = false
+
+    /// The axis the cell's neighbours lie on: across in rows mode, down in
+    /// columns mode.
+    private var cellAxisHorizontal: Bool { !isInColumn }
 
     private var slot: WindowSlot {
         WindowSlot(
@@ -1292,17 +1427,32 @@ struct NestedWindowTile: View {
             externalWindowId: nil,
             sourceNestedIndex: nestedIndex
         ))
-        .dropDestination(for: WindowDragData.self) { items, _ in
-            // Anything already placed in this layout — another pane of this
-            // split, a pane of some other split, or a plain cell in another
-            // column or row — trades places with this one. Sidebar drags carry
-            // no source slot and belong to the split behind this pane.
-            guard let drag = items.first,
-                  let source = drag.sourceSlot,
-                  source != slot
-            else { return false }
+        .contentShape(Rectangle())
+        .dropDestination(for: WindowDragData.self) { items, location in
+            // Near the cell's outer edge this means "beside the whole split";
+            // anywhere else it means "trade places with this pane" — which
+            // works against another pane of this split, a pane of some other
+            // split, or a plain cell elsewhere. Sidebar drags carry no source
+            // slot and belong to the split behind this pane.
+            guard let drag = items.first, let source = drag.sourceSlot else { return false }
 
-            windowManager.swapWindows(source, slot)
+            switch cellDropRegion(
+                at: location,
+                in: paneSize,
+                horizontal: cellAxisHorizontal,
+                touchesBefore: touchesBefore,
+                touchesAfter: touchesAfter
+            ) {
+            case .before:
+                windowManager.moveWindow(from: source, insertingAt: windowIndex,
+                                         columnIndex: columnIndex, rowIndex: rowIndex)
+            case .after:
+                windowManager.moveWindow(from: source, insertingAt: windowIndex + 1,
+                                         columnIndex: columnIndex, rowIndex: rowIndex)
+            case .inside:
+                guard source != slot else { return false }
+                windowManager.swapWindows(source, slot)
+            }
             return true
         } isTargeted: { targeted in
             isDropTarget = targeted
@@ -1415,8 +1565,16 @@ struct NestedDropZone: View {
     let rowIndex: Int?
     let windowIndex: Int
     let isInColumn: Bool
+    /// See NestedWindowTile — the empty half of a split is an edge of the cell
+    /// too, so a drop near its outer edge means "beside the cell", not "into
+    /// the split".
+    let zoneSize: CGSize
+    let touchesBefore: Bool
+    let touchesAfter: Bool
     @Environment(WindowManager.self) private var windowManager
     @State private var isDropTarget = false
+
+    private var cellAxisHorizontal: Bool { !isInColumn }
 
     /// The cell holding the split this zone adds to.
     private var slot: WindowSlot {
@@ -1463,7 +1621,7 @@ struct NestedDropZone: View {
         // split. Verified from a drop logged at a point provably inside the box
         // that the row, not the zone, received.
         .contentShape(Rectangle())
-        .dropDestination(for: WindowDragData.self) { items, _ in
+        .dropDestination(for: WindowDragData.self) { items, location in
             guard let dragData = items.first else { return false }
 
             // Dragging from sidebar
@@ -1479,12 +1637,25 @@ struct NestedDropZone: View {
 
             // Anything already placed: a plain cell from another column or row,
             // or a pane lifted out of some other split.
-            if let source = dragData.sourceSlot {
-                windowManager.moveWindow(from: source, intoSplitAt: slot)
-                return true
-            }
+            guard let source = dragData.sourceSlot else { return false }
 
-            return false
+            switch cellDropRegion(
+                at: location,
+                in: zoneSize,
+                horizontal: cellAxisHorizontal,
+                touchesBefore: touchesBefore,
+                touchesAfter: touchesAfter
+            ) {
+            case .before:
+                windowManager.moveWindow(from: source, insertingAt: windowIndex,
+                                         columnIndex: columnIndex, rowIndex: rowIndex)
+            case .after:
+                windowManager.moveWindow(from: source, insertingAt: windowIndex + 1,
+                                         columnIndex: columnIndex, rowIndex: rowIndex)
+            case .inside:
+                windowManager.moveWindow(from: source, intoSplitAt: slot)
+            }
+            return true
         } isTargeted: { isTargeted in
             isDropTarget = isTargeted
         }
@@ -1747,11 +1918,45 @@ struct RowWindowTilePreview: View {
     let widthProportion: CGFloat
     @Environment(WindowManager.self) private var windowManager
     @State private var isHovered = false
+    @State private var tileSize: CGSize = .zero
+    @State private var isDropTarget = false
+
+    private var slot: WindowSlot {
+        WindowSlot(columnIndex: nil, rowIndex: rowIndex, windowIndex: windowIndex, nestedIndex: nil)
+    }
 
     var body: some View {
         Group {
             if let window = rowWindow.window {
+                // See the columns equivalent: the edges mean "beside this
+                // cell", the middle means "trade places with it".
                 singleWindowView(window: window)
+                    .measureSize(into: $tileSize)
+                    .contentShape(Rectangle())
+                    .dropDestination(for: WindowDragData.self) { items, location in
+                        guard let source = items.first?.sourceSlot else { return false }
+
+                        switch cellDropRegion(
+                            at: location, in: tileSize, horizontal: true,
+                            touchesBefore: true, touchesAfter: true
+                        ) {
+                        case .before:
+                            windowManager.moveWindow(from: source, insertingAt: windowIndex,
+                                                     columnIndex: nil, rowIndex: rowIndex)
+                        case .after:
+                            windowManager.moveWindow(from: source, insertingAt: windowIndex + 1,
+                                                     columnIndex: nil, rowIndex: rowIndex)
+                        case .inside:
+                            guard source != slot else { return false }
+                            windowManager.swapWindows(source, slot)
+                        }
+                        return true
+                    } isTargeted: { isDropTarget = $0 }
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(Color.accentColor, lineWidth: 2)
+                            .opacity(isDropTarget ? 1 : 0)
+                    )
             } else if let container = rowWindow.nestedContainer {
                 // Shared with columns mode. The rows-only version this replaced
                 // was a plain VStack of intrinsically-sized children, so a split

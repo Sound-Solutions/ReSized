@@ -2230,6 +2230,52 @@ class WindowManager {
         }
     }
 
+    /// Move a window out of wherever it is and drop it in as its own cell at
+    /// `targetIndex` of a column or row.
+    ///
+    /// This is what a drop near a cell's outer edge means: not "into that cell"
+    /// but "beside it". The source may be a plain cell or a pane lifted out of a
+    /// split; either way it lands as a sibling of the cell it was dropped next
+    /// to.
+    func moveWindow(from source: WindowSlot, insertingAt targetIndex: Int, columnIndex: Int?, rowIndex: Int?) {
+        let sameContainer = source.columnIndex == columnIndex && source.rowIndex == rowIndex
+
+        // Dropping a plain cell against its own edge would take it out and put
+        // it straight back, costing a rebuild to change nothing.
+        if sameContainer, source.nestedIndex == nil,
+           targetIndex == source.windowIndex || targetIndex == source.windowIndex + 1 {
+            return
+        }
+
+        let before = cellCount(columnIndex: columnIndex, rowIndex: rowIndex)
+        guard let window = takeWindow(at: source) else { return }
+        let removedACell = cellCount(columnIndex: columnIndex, rowIndex: rowIndex) < before
+
+        // Taking a cell out shifts everything after it up one. Draining a split
+        // to a single pane only collapses the cell in place, so the indices are
+        // untouched — which is why this compares counts rather than assuming.
+        var landing = targetIndex
+        if sameContainer, removedACell, source.windowIndex < targetIndex {
+            landing -= 1
+        }
+
+        if let columnIndex {
+            addWindow(window, toColumn: columnIndex, atIndex: landing)
+        } else if let rowIndex {
+            addWindow(window, toRow: rowIndex, atIndex: landing)
+        }
+    }
+
+    private func cellCount(columnIndex: Int?, rowIndex: Int?) -> Int {
+        if let columnIndex, columns.indices.contains(columnIndex) {
+            return columns[columnIndex].windows.count
+        }
+        if let rowIndex, rows.indices.contains(rowIndex) {
+            return rows[rowIndex].windows.count
+        }
+        return 0
+    }
+
     /// The id of the cell a slot addresses — stable across the reindexing that
     /// removing another cell causes.
     private func cellId(at slot: WindowSlot) -> UUID? {

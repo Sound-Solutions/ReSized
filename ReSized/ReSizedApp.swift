@@ -10,6 +10,10 @@ struct ReSizedApp: App {
     var body: some Scene {
         Window("ReSized", id: "main") {
             ContentView()
+                // The picker sidebar is a fixed 280pt, so anything narrower
+                // than this leaves the grid too little room and it starts
+                // running underneath the sidebar rather than shrinking.
+                .frame(minWidth: 820, minHeight: 540)
                 .environment(WindowManager.shared)
                 .onAppear {
                     // Store openWindow action for use from AppDelegate
