@@ -1801,9 +1801,17 @@ class WindowManager: ObservableObject {
         return constrained
     }
 
-    /// Apply layout to a nested container within a given frame
-    private func applyNestedContainerLayout(container: LayoutContainer, in frame: CGRect) {
-        guard !container.children.isEmpty else { return }
+    /// Place a split's panes inside a frame, returning where each one actually
+    /// landed, keyed by pane id.
+    ///
+    /// Those frames are what incoming resize notifications get judged against —
+    /// without them a pane's edge drag has no baseline to measure from and is
+    /// discarded, which is why seams used to move for a plain window but not for
+    /// a window inside a split.
+    @discardableResult
+    private func applyNestedContainerLayout(container: LayoutContainer, in frame: CGRect) -> [UUID: CGRect] {
+        var placed: [UUID: CGRect] = [:]
+        guard !container.children.isEmpty else { return placed }
 
         if container.direction == .horizontal {
             // Children arranged left-to-right
@@ -1813,8 +1821,12 @@ class WindowManager: ObservableObject {
                 let childWidth = isLast ? (frame.maxX - currentX) : (child.proportion * frame.width)
                 let childFrame = CGRect(x: currentX, y: frame.minY, width: childWidth, height: frame.height)
 
-                _ = child.window.setFrame(constrainFrame(childFrame, for: child.window))
-                currentX += childWidth
+                let actual = place(child.window, in: childFrame)
+                placed[child.id] = actual
+                // Butt the next pane against where this one really ended, the
+                // same way the top level does, so an app that refuses its width
+                // doesn't leave a strip of desktop at the seam.
+                currentX += max(actual.width, 0)
             }
         } else {
             // Children arranged top-to-bottom
@@ -1824,10 +1836,13 @@ class WindowManager: ObservableObject {
                 let childHeight = isLast ? (currentTop - frame.minY) : (child.proportion * frame.height)
                 let childFrame = CGRect(x: frame.minX, y: currentTop - childHeight, width: frame.width, height: childHeight)
 
-                _ = child.window.setFrame(constrainFrame(childFrame, for: child.window))
-                currentTop -= childHeight
+                let actual = place(child.window, in: childFrame)
+                placed[child.id] = actual
+                currentTop -= max(actual.height, 0)
             }
         }
+
+        return placed
     }
 
     // MARK: - Split Functions for Nested Containers
@@ -2510,61 +2525,88 @@ class WindowManager: ObservableObject {
         // Find which window changed and compare to expected
         guard let currentFrame = ExternalWindow.getFrame(from: element) else { return }
 
-        // Find the window in our layout and check delta
-        var changedWindow: (cellId: UUID, primaryIndex: Int, winIndex: Int, delta: FrameDelta)?
+        guard let found = locate(element: element, in: layout),
+              let expected = layout.expectedFrames[found.frameKey],
+              let delta = detectFrameChange(
+                  from: convertFrameToAXCoordinates(expected),
+                  to: currentFrame
+              )
+        else { return }
+
+        if found.slot.nestedIndex != nil {
+            handleNestedWindowResize(in: layout, slot: found.slot, delta: delta)
+        } else {
+            switch layout.layoutMode {
+            case .columns:
+                handleWindowResize(in: layout, columnIndex: found.slot.columnIndex ?? 0,
+                                   windowIndex: found.slot.windowIndex, delta: delta)
+            case .rows:
+                handleRowWindowResize(in: layout, rowIndex: found.slot.rowIndex ?? 0,
+                                      windowIndex: found.slot.windowIndex, delta: delta)
+            }
+        }
+
+        // Re-baseline this window right now, against where it actually is.
+        //
+        // handleWindowResize ADDS the delta to the current proportion, and the
+        // reflow that refreshes every expected frame is debounced — so without
+        // this, every event during a drag measures from the same stale baseline
+        // and adds it again: 10px, then 20px, then 30px. The window ends up
+        // nowhere near where the mouse was released.
+        layout.expectedFrames[found.frameKey] = convertFrameFromAXCoordinates(currentFrame)
+
+        scheduleReflow(for: layout)
+    }
+
+    /// Find where an AX element sits in a layout — cells and split panes alike.
+    ///
+    /// `frameKey` is what expectedFrames stores this window's last known frame
+    /// under: a cell's own id for a plain window, the pane's id for a window
+    /// inside a split.
+    private func locate(
+        element: AXUIElement,
+        in layout: MonitorLayout
+    ) -> (slot: WindowSlot, frameKey: UUID)? {
+        func search(
+            _ cells: [(id: UUID, window: ExternalWindow?, container: LayoutContainer?)],
+            _ slotAt: (Int, Int?) -> WindowSlot
+        ) -> (slot: WindowSlot, frameKey: UUID)? {
+            for (windowIndex, cell) in cells.enumerated() {
+                if let window = cell.window, CFEqual(window.axElement, element) {
+                    return (slotAt(windowIndex, nil), cell.id)
+                }
+                guard let container = cell.container else { continue }
+                for (nestedIndex, pane) in container.children.enumerated()
+                where CFEqual(pane.window.axElement, element) {
+                    return (slotAt(windowIndex, nestedIndex), pane.id)
+                }
+            }
+            return nil
+        }
 
         switch layout.layoutMode {
         case .columns:
-            for (colIndex, column) in layout.columns.enumerated() {
-                for (winIndex, colWindow) in column.windows.enumerated() {
-                    // Check if this is the element that changed
-                    if let window = colWindow.window, CFEqual(window.axElement, element) {
-                        guard let expected = layout.expectedFrames[colWindow.id] else { continue }
-                        let expectedAX = convertFrameToAXCoordinates(expected)
-                        if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
-                            changedWindow = (colWindow.id, colIndex, winIndex, delta)
-                        }
-                        break
-                    }
+            for (columnIndex, column) in layout.columns.enumerated() {
+                let cells = column.windows.map { (id: $0.id, window: $0.window, container: $0.nestedContainer) }
+                if let hit = search(cells, { windowIndex, nestedIndex in
+                    WindowSlot(columnIndex: columnIndex, rowIndex: nil,
+                               windowIndex: windowIndex, nestedIndex: nestedIndex)
+                }) {
+                    return hit
                 }
             }
         case .rows:
             for (rowIndex, row) in layout.rows.enumerated() {
-                for (winIndex, rowWindow) in row.windows.enumerated() {
-                    if let window = rowWindow.window, CFEqual(window.axElement, element) {
-                        guard let expected = layout.expectedFrames[rowWindow.id] else { continue }
-                        let expectedAX = convertFrameToAXCoordinates(expected)
-                        if let delta = detectFrameChange(from: expectedAX, to: currentFrame) {
-                            changedWindow = (rowWindow.id, rowIndex, winIndex, delta)
-                        }
-                        break
-                    }
+                let cells = row.windows.map { (id: $0.id, window: $0.window, container: $0.nestedContainer) }
+                if let hit = search(cells, { windowIndex, nestedIndex in
+                    WindowSlot(columnIndex: nil, rowIndex: rowIndex,
+                               windowIndex: windowIndex, nestedIndex: nestedIndex)
+                }) {
+                    return hit
                 }
             }
         }
-
-        // If significant change detected, handle it
-        if let change = changedWindow {
-            switch layout.layoutMode {
-            case .columns:
-                handleWindowResize(in: layout, columnIndex: change.primaryIndex,
-                                   windowIndex: change.winIndex, delta: change.delta)
-            case .rows:
-                handleRowWindowResize(in: layout, rowIndex: change.primaryIndex,
-                                      windowIndex: change.winIndex, delta: change.delta)
-            }
-
-            // Re-baseline this window right now, against where it actually is.
-            //
-            // handleWindowResize ADDS the delta to the current proportion, and the
-            // reflow that refreshes every expected frame is debounced — so without
-            // this, every event during a drag measures from the same stale baseline
-            // and adds it again: 10px, then 20px, then 30px. The window ends up
-            // nowhere near where the mouse was released.
-            layout.expectedFrames[change.cellId] = convertFrameFromAXCoordinates(currentFrame)
-
-            scheduleReflow(for: layout)
-        }
+        return nil
     }
 
     /// Reflow the rest of the layout once the user stops dragging a real window's
@@ -2771,7 +2813,7 @@ class WindowManager: ObservableObject {
                         currentTop -= actual.height
                         columnWidth = max(columnWidth, actual.width)
                     } else if let container = cell.nestedContainer {
-                        applyNestedContainerLayout(container: container, in: frame)
+                        placed.merge(applyNestedContainerLayout(container: container, in: frame)) { _, new in new }
                         currentTop -= intendedHeight
                         columnWidth = max(columnWidth, intendedWidth)
                     }
@@ -2824,7 +2866,7 @@ class WindowManager: ObservableObject {
                         currentX += actual.width
                         rowHeight = max(rowHeight, actual.height)
                     } else if let container = cell.nestedContainer {
-                        applyNestedContainerLayout(container: container, in: frame)
+                        placed.merge(applyNestedContainerLayout(container: container, in: frame)) { _, new in new }
                         currentX += intendedWidth
                         rowHeight = max(rowHeight, intendedHeight)
                     }
@@ -3134,6 +3176,166 @@ class WindowManager: ObservableObject {
         // Normalize proportions to prevent floating-point drift
         normalizeColumnProportions(in: layout)
         normalizeWindowProportions(inColumn: columnIndex, in: layout)
+    }
+
+    /// Route a split pane's edge drag.
+    ///
+    /// A pane has two kinds of edge. The ones facing another pane of the same
+    /// split move that split's own divider. The rest are the outside of the
+    /// split, which is the cell's boundary — so they move whatever seam the cell
+    /// sits against, exactly as if the cell held a plain window. Splitting the
+    /// delta and handing each half to the right place is all this does; both
+    /// halves are handled by code that already worked for cells.
+    private func handleNestedWindowResize(in layout: MonitorLayout, slot: WindowSlot, delta: FrameDelta) {
+        guard let nestedIndex = slot.nestedIndex,
+              let container = nestedContainer(in: layout, at: slot),
+              container.children.indices.contains(nestedIndex)
+        else { return }
+
+        let isFirst = nestedIndex == 0
+        let isLast = nestedIndex == container.children.count - 1
+
+        var inner = FrameDelta()
+        var outer = delta
+
+        switch container.direction {
+        case .horizontal:
+            if !isFirst { inner.leftEdge = delta.leftEdge; outer.leftEdge = 0 }
+            if !isLast { inner.rightEdge = delta.rightEdge; outer.rightEdge = 0 }
+        case .vertical:
+            if !isFirst { inner.topEdge = delta.topEdge; outer.topEdge = 0 }
+            if !isLast { inner.bottomEdge = delta.bottomEdge; outer.bottomEdge = 0 }
+        }
+
+        resizeSplitPane(in: layout, slot: slot, container: container, delta: inner)
+
+        switch layout.layoutMode {
+        case .columns:
+            handleWindowResize(in: layout, columnIndex: slot.columnIndex ?? 0,
+                               windowIndex: slot.windowIndex, delta: outer)
+        case .rows:
+            handleRowWindowResize(in: layout, rowIndex: slot.rowIndex ?? 0,
+                                  windowIndex: slot.windowIndex, delta: outer)
+        }
+    }
+
+    /// Move the divider between a pane and its neighbour, mirroring what
+    /// handleWindowResize does for cells — same sign conventions, same 10%
+    /// floor, but measured against the split's own track rather than the whole
+    /// monitor.
+    private func resizeSplitPane(
+        in layout: MonitorLayout,
+        slot: WindowSlot,
+        container: LayoutContainer,
+        delta: FrameDelta
+    ) {
+        let threshold: CGFloat = 8
+        guard let index = slot.nestedIndex else { return }
+
+        let track = splitTrackSize(in: layout, slot: slot, direction: container.direction)
+        guard track > 0 else { return }
+
+        var updated = container
+        let neighbourIndex: Int
+        let proportionalDelta: CGFloat
+
+        switch container.direction {
+        case .horizontal:
+            guard abs(delta.rightEdge - delta.leftEdge) > threshold else { return }
+            if abs(delta.leftEdge) > abs(delta.rightEdge) {
+                // Left edge moved right = this pane narrows, the one before widens.
+                neighbourIndex = index - 1
+                proportionalDelta = -delta.leftEdge / track
+            } else {
+                neighbourIndex = index + 1
+                proportionalDelta = delta.rightEdge / track
+            }
+        case .vertical:
+            guard abs(delta.bottomEdge - delta.topEdge) > threshold else { return }
+            if abs(delta.topEdge) > abs(delta.bottomEdge) {
+                // AX y grows downward: top edge moving up is a negative delta
+                // and makes this pane taller.
+                neighbourIndex = index - 1
+                proportionalDelta = -delta.topEdge / track
+            } else {
+                neighbourIndex = index + 1
+                proportionalDelta = delta.bottomEdge / track
+            }
+        }
+
+        guard updated.children.indices.contains(neighbourIndex) else { return }
+
+        let mine = updated.children[index].proportion + proportionalDelta
+        let theirs = updated.children[neighbourIndex].proportion - proportionalDelta
+        guard mine >= 0.1, theirs >= 0.1 else { return }
+
+        updated.children[index].proportion = mine
+        updated.children[neighbourIndex].proportion = theirs
+        updated.normalizeProportions()
+
+        setNestedContainer(updated, in: layout, at: slot)
+    }
+
+    /// How wide or tall a split is on screen, which is what turns a pixel drag
+    /// into a share of the split. A split's panes divide the cell, so the track
+    /// is the cell's own size — not the monitor's, which is the track for the
+    /// column and row proportions one level up.
+    private func splitTrackSize(
+        in layout: MonitorLayout,
+        slot: WindowSlot,
+        direction: SplitDirection
+    ) -> CGFloat {
+        let bounds = layout.containerBounds
+
+        switch layout.layoutMode {
+        case .columns:
+            guard let columnIndex = slot.columnIndex,
+                  layout.columns.indices.contains(columnIndex),
+                  layout.columns[columnIndex].windows.indices.contains(slot.windowIndex)
+            else { return 0 }
+            return direction == .horizontal
+                ? layout.columns[columnIndex].widthProportion * bounds.width
+                : layout.columns[columnIndex].windows[slot.windowIndex].heightProportion * bounds.height
+
+        case .rows:
+            guard let rowIndex = slot.rowIndex,
+                  layout.rows.indices.contains(rowIndex),
+                  layout.rows[rowIndex].windows.indices.contains(slot.windowIndex)
+            else { return 0 }
+            return direction == .horizontal
+                ? layout.rows[rowIndex].windows[slot.windowIndex].widthProportion * bounds.width
+                : layout.rows[rowIndex].heightProportion * bounds.height
+        }
+    }
+
+    /// The split held by a cell of a given layout. The `columns`/`rows`
+    /// accessors elsewhere proxy the *selected* monitor; event handling runs
+    /// for whichever layout raised the notification, so these read and write
+    /// the layout they are handed.
+    private func nestedContainer(in layout: MonitorLayout, at slot: WindowSlot) -> LayoutContainer? {
+        if let columnIndex = slot.columnIndex,
+           layout.columns.indices.contains(columnIndex),
+           layout.columns[columnIndex].windows.indices.contains(slot.windowIndex) {
+            return layout.columns[columnIndex].windows[slot.windowIndex].nestedContainer
+        }
+        if let rowIndex = slot.rowIndex,
+           layout.rows.indices.contains(rowIndex),
+           layout.rows[rowIndex].windows.indices.contains(slot.windowIndex) {
+            return layout.rows[rowIndex].windows[slot.windowIndex].nestedContainer
+        }
+        return nil
+    }
+
+    private func setNestedContainer(_ container: LayoutContainer, in layout: MonitorLayout, at slot: WindowSlot) {
+        if let columnIndex = slot.columnIndex,
+           layout.columns.indices.contains(columnIndex),
+           layout.columns[columnIndex].windows.indices.contains(slot.windowIndex) {
+            layout.columns[columnIndex].windows[slot.windowIndex].nestedContainer = container
+        } else if let rowIndex = slot.rowIndex,
+                  layout.rows.indices.contains(rowIndex),
+                  layout.rows[rowIndex].windows.indices.contains(slot.windowIndex) {
+            layout.rows[rowIndex].windows[slot.windowIndex].nestedContainer = container
+        }
     }
 
     private func handleRowWindowResize(in layout: MonitorLayout, rowIndex: Int, windowIndex: Int, delta: FrameDelta) {
