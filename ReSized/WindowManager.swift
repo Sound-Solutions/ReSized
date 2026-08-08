@@ -2305,6 +2305,12 @@ class WindowManager {
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
         let cgPoint = CGPoint(x: screenPoint.x, y: primaryHeight - screenPoint.y)
 
+        // The screen this point is on, in the same top-left space — needed to
+        // recognise screen-sized backing chrome below.
+        let screenCG = NSScreen.screens
+            .first { $0.frame.contains(screenPoint) }
+            .map { convertFrameToAXCoordinates($0.frame) }
+
         // The entries come front-to-back. The seam is exposed unless the
         // topmost window under the point is an unmanaged one sitting in front
         // of the layout — an unmanaged window *behind* every managed one is
@@ -2329,6 +2335,12 @@ class WindowManager {
             guard let boundsDict = entry[kCGWindowBounds as String] as? [String: Any],
                   let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary),
                   bounds.contains(cgPoint) else { continue }
+
+            // A screen-sized window above the ordinary layer is backing
+            // chrome, not cover: the Dock keeps an invisible full-display
+            // window on its home screen, and treating it as an occluder
+            // killed every seam on that one monitor.
+            if layer != 0, let screenCG, bounds.contains(screenCG) { continue }
 
             if managedIDs.contains(number) { return true }
             unmanagedHit = true
