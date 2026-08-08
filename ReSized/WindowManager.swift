@@ -1182,11 +1182,35 @@ class WindowManager: ObservableObject {
         }
 
         let discovered = WindowDiscovery.discoverAllWindows()
+        let placed = placedWindowIds
+        availableWindows = discovered.filter { !placed.contains($0.id) }
+    }
 
-        // Filter out windows already in columns or rows (including nested containers)
-        var usedIds = Set(columns.flatMap { $0.windows.flatMap { $0.allWindows.map { $0.id } } })
-        usedIds.formUnion(rows.flatMap { $0.windows.flatMap { $0.allWindows.map { $0.id } } })
-        availableWindows = discovered.filter { !usedIds.contains($0.id) }
+    /// Every window currently placed in any monitor's layout, nested splits
+    /// included.
+    ///
+    /// Deliberately spans all monitors: a window parked in the layout for another
+    /// display is still spoken for, and offering it again in the picker invites
+    /// assigning the same window to two places at once.
+    ///
+    /// Only the layout's active mode is counted. Each MonitorLayout keeps both a
+    /// columns and a rows array and just one of them is live, so counting both
+    /// would reserve windows left behind in whichever mode isn't in use.
+    private var placedWindowIds: Set<UUID> {
+        var ids = Set<UUID>()
+        for layout in monitorLayouts.values {
+            switch layout.layoutMode {
+            case .columns:
+                for column in layout.columns {
+                    for cell in column.windows { ids.formUnion(cell.allWindows.map(\.id)) }
+                }
+            case .rows:
+                for row in layout.rows {
+                    for cell in row.windows { ids.formUnion(cell.allWindows.map(\.id)) }
+                }
+            }
+        }
+        return ids
     }
 
     // MARK: - Column Management
@@ -3264,7 +3288,12 @@ class WindowManager: ObservableObject {
             layout.layoutMode = mode
         }
 
-        // Refresh available windows
+        // Release this layout's current windows before refreshing the pool.
+        // availableWindows now excludes anything placed in any layout, so leaving
+        // the old contents in place would mark them taken and the preset being
+        // loaded could not reclaim its own windows.
+        layout.columns = []
+        layout.rows = []
         refreshAvailableWindows()
 
         // Re-match windows to slots
