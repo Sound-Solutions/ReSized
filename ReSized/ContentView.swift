@@ -197,19 +197,26 @@ struct SeamDropDelegate: DropDelegate {
     let state: SeamDragState
 
     func validateDrop(info: DropInfo) -> Bool {
-        windowManager.pendingDrag != nil
+        let ok = windowManager.pendingDrag != nil
+        AccessibilityHelper.logDebug("DROP validate -> \(ok)")
+        return ok
     }
 
     func dropEntered(info: DropInfo) {
         state.highlighted = nearestSeam(to: info.location)
+        AccessibilityHelper.logDebug("DROP entered at \(info.location); seams=\(seams().count)")
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         state.highlighted = nearestSeam(to: info.location)
-        return DropProposal(operation: .move)
+        // .copy, not .move. A SwiftUI onDrag session does not advertise move,
+        // and proposing an operation the source never offered leaves the drag
+        // looking live right up to release and then refuses it.
+        return DropProposal(operation: .copy)
     }
 
     func dropExited(info: DropInfo) {
+        AccessibilityHelper.logDebug("DROP exited")
         state.highlighted = nil
     }
 
@@ -218,9 +225,16 @@ struct SeamDropDelegate: DropDelegate {
             state.highlighted = nil
             windowManager.pendingDrag = nil
         }
-        guard let drag = windowManager.pendingDrag,
-              let seam = nearestSeam(to: info.location) else { return false }
+        guard let drag = windowManager.pendingDrag else {
+            AccessibilityHelper.logDebug("DROP perform: no pendingDrag")
+            return false
+        }
+        guard let seam = nearestSeam(to: info.location) else {
+            AccessibilityHelper.logDebug("DROP perform: no seam near \(info.location)")
+            return false
+        }
 
+        AccessibilityHelper.logDebug("DROP perform: \(drag) -> \(seam.destination)")
         windowManager.place(drag, at: seam.destination)
         return true
     }

@@ -2117,6 +2117,7 @@ class WindowManager {
     /// own cell, past a split, between two cells, or into a split alongside its
     /// panes.
     func place(_ drag: PendingDrag, at destination: SeamDestination) {
+        AccessibilityHelper.logDebug("place \(drag) at \(destination)")
         switch drag {
         case .available(let windowId):
             guard let window = availableWindows.first(where: { $0.id == windowId }) else { return }
@@ -2129,10 +2130,61 @@ class WindowManager {
             // these are checked before anything moves.
             guard !isNoOp(moving: source, to: destination) else { return }
 
+            // Shuffling panes within one split is a reorder, not a move. Taking
+            // the window out first would drain a two-pane split to one, which
+            // collapses the cell to a plain window — and then there is no split
+            // left to put it back into.
+            if case .pane(let cell, let index) = destination,
+               source.nestedIndex != nil, source.cell == cell {
+                reorderPane(in: cell, from: source.nestedIndex ?? 0, toSeam: index)
+                return
+            }
+
+            // A pane destination names its cell by index, and lifting the
+            // source out can renumber the cells — so remember which cell it
+            // meant, and find it again once the source is gone.
+            var destinationCellId: UUID?
+            if case .pane(let cell, _) = destination {
+                destinationCellId = cellId(at: cell)
+                guard destinationCellId != nil else { return }
+            }
+
             let adjusted = destinationAfterVacating(source, destination)
             guard let window = takeWindow(at: source) else { return }
-            insert(window, at: adjusted)
+
+            var landing = adjusted
+            if case .pane(_, let index) = adjusted,
+               let destinationCellId,
+               let current = slot(ofCell: destinationCellId) {
+                landing = .pane(cell: current, index: index)
+            }
+            insert(window, at: landing)
         }
+    }
+
+    /// Move a pane to a different position within its own split.
+    ///
+    /// `toSeam` is a boundary index — n+1 of them for n panes — so dropping
+    /// after the last pane is index n, one past the last valid pane position.
+    private func reorderPane(in cell: WindowSlot, from: Int, toSeam: Int) {
+        guard var container = nestedContainer(
+                  columnIndex: cell.columnIndex, rowIndex: cell.rowIndex, windowIndex: cell.windowIndex
+              ),
+              container.children.indices.contains(from)
+        else { return }
+
+        let pane = container.children.remove(at: from)
+        // Removing shifts everything after it down one.
+        let landing = max(0, min(toSeam > from ? toSeam - 1 : toSeam, container.children.count))
+        container.children.insert(pane, at: landing)
+
+        setNestedContainer(
+            container,
+            columnIndex: cell.columnIndex,
+            rowIndex: cell.rowIndex,
+            windowIndex: cell.windowIndex
+        )
+        applyLayoutIfActive()
     }
 
     private func insert(_ window: ExternalWindow, at destination: SeamDestination) {
@@ -2154,7 +2206,15 @@ class WindowManager {
     private func insertPane(_ window: ExternalWindow, intoSplitAt cell: WindowSlot, at index: Int) {
         guard var container = nestedContainer(
             columnIndex: cell.columnIndex, rowIndex: cell.rowIndex, windowIndex: cell.windowIndex
-        ) else { return }
+        ) else {
+            // The split went away between the window being lifted out and put
+            // back — it is already out of the layout at this point, so put it
+            // down beside where the split was rather than dropping it entirely.
+            insert(window, at: .cell(
+                columnIndex: cell.columnIndex, rowIndex: cell.rowIndex, index: cell.windowIndex
+            ))
+            return
+        }
 
         let share = 1.0 / CGFloat(container.children.count + 1)
         for i in container.children.indices {
