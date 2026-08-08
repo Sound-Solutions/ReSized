@@ -2290,6 +2290,18 @@ class WindowManager {
 
         func frame(_ id: UUID) -> CGRect? { layout.expectedFrames[id] }
 
+        /// The area a cell covers.
+        ///
+        /// Only plain cells have a frame recorded against their own id — a
+        /// split cell's windows are recorded against the panes. Reading the
+        /// cell id alone therefore came back empty for every split, and every
+        /// seam with a split on either side of it was skipped.
+        func cellArea(_ id: UUID, _ container: LayoutContainer?) -> CGRect? {
+            if let direct = frame(id) { return direct }
+            guard let container else { return nil }
+            return container.children.compactMap { frame($0.id) }.reduce(nil, union)
+        }
+
         /// The seam between two adjacent frames, centred on the gap between
         /// them so it stays grabbable even when they are flush.
         func seam(
@@ -2349,14 +2361,15 @@ class WindowManager {
                             columnIndex: columnIndex, rowIndex: nil, windowIndex: cellIndex, nestedIndex: nil
                         ))
                     }
-                    guard cellIndex + 1 < column.windows.count,
-                          let a = frame(cell.id),
-                          let b = frame(column.windows[cellIndex + 1].id) else { continue }
+                    let next = cellIndex + 1 < column.windows.count ? column.windows[cellIndex + 1] : nil
+                    guard let next,
+                          let a = cellArea(cell.id, cell.nestedContainer),
+                          let b = cellArea(next.id, next.nestedContainer) else { continue }
                     seams.append(seam(
                         between: a, and: b, vertical: false,
                         divider: .cellInColumn(columnIndex: columnIndex, index: cellIndex),
                         trackSize: bounds.height,
-                        proportions: (cell.heightProportion, column.windows[cellIndex + 1].heightProportion)
+                        proportions: (cell.heightProportion, next.heightProportion)
                     ))
                 }
 
@@ -2379,14 +2392,15 @@ class WindowManager {
                             columnIndex: nil, rowIndex: rowIndex, windowIndex: cellIndex, nestedIndex: nil
                         ))
                     }
-                    guard cellIndex + 1 < row.windows.count,
-                          let a = frame(cell.id),
-                          let b = frame(row.windows[cellIndex + 1].id) else { continue }
+                    let next = cellIndex + 1 < row.windows.count ? row.windows[cellIndex + 1] : nil
+                    guard let next,
+                          let a = cellArea(cell.id, cell.nestedContainer),
+                          let b = cellArea(next.id, next.nestedContainer) else { continue }
                     seams.append(seam(
                         between: a, and: b, vertical: true,
                         divider: .cellInRow(rowIndex: rowIndex, index: cellIndex),
                         trackSize: bounds.width,
-                        proportions: (cell.widthProportion, row.windows[cellIndex + 1].widthProportion)
+                        proportions: (cell.widthProportion, next.widthProportion)
                     ))
                 }
 
