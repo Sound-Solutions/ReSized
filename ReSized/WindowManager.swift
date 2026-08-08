@@ -2261,6 +2261,31 @@ class WindowManager {
         return nil
     }
 
+    /// Undo a split, keeping the window that is already sitting in it.
+    ///
+    /// Only meaningful while the split still holds a single pane, which is
+    /// exactly when the empty half — and the close button offering this — is on
+    /// screen. A split that has been filled is unmade by closing its panes
+    /// instead; the last one standing collapses the cell on its own.
+    func unsplitCell(columnIndex: Int?, rowIndex: Int?, windowIndex: Int) {
+        guard let container = nestedContainer(
+                  columnIndex: columnIndex, rowIndex: rowIndex, windowIndex: windowIndex
+              ),
+              container.children.count == 1
+        else { return }
+
+        collapseCellToWindow(
+            container.children[0].window,
+            at: WindowSlot(
+                columnIndex: columnIndex,
+                rowIndex: rowIndex,
+                windowIndex: windowIndex,
+                nestedIndex: nil
+            )
+        )
+        applyLayoutIfActive()
+    }
+
     /// Replace a cell's split with a single window, keeping the cell's id and
     /// share of the column or row.
     private func collapseCellToWindow(_ window: ExternalWindow, at slot: WindowSlot) {
