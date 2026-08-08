@@ -10,6 +10,8 @@ struct WindowDragData: Codable, Transferable {
     let sourceRow: Int?     // nil if from sidebar (rows mode)
     let sourceIndex: Int?   // position within column/row
     let externalWindowId: UUID?  // For sidebar items, the ExternalWindow.id
+    /// Which pane of a split this came from, when dragged out of one.
+    var sourceNestedIndex: Int? = nil
 
     static var transferRepresentation: some TransferRepresentation {
         CodableRepresentation(contentType: .json)
@@ -1226,6 +1228,7 @@ struct NestedWindowTile: View {
     let windowIndex: Int
     let isInColumn: Bool
     @EnvironmentObject var windowManager: WindowManager
+    @State private var isDropTarget = false
 
     var body: some View {
         HStack {
@@ -1260,6 +1263,41 @@ struct NestedWindowTile: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(colorForApp(windowNode.window.ownerName))
         .clipShape(RoundedRectangle(cornerRadius: 4))
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .strokeBorder(Color.accentColor, lineWidth: 2)
+                .opacity(isDropTarget ? 1 : 0)
+        )
+        .draggable(WindowDragData(
+            windowId: windowNode.window.id,
+            sourceColumn: columnIndex,
+            sourceRow: rowIndex,
+            sourceIndex: windowIndex,
+            externalWindowId: nil,
+            sourceNestedIndex: nestedIndex
+        ))
+        .dropDestination(for: WindowDragData.self) { items, _ in
+            guard let drag = items.first,
+                  let from = drag.sourceNestedIndex,
+                  from != nestedIndex,
+                  // Only within the same split — dragging between different
+                  // splits is a move, not a swap, and isn't handled here.
+                  drag.sourceColumn == columnIndex,
+                  drag.sourceRow == rowIndex,
+                  drag.sourceIndex == windowIndex
+            else { return false }
+
+            windowManager.swapNestedWindows(
+                columnIndex: columnIndex,
+                rowIndex: rowIndex,
+                windowIndex: windowIndex,
+                from: from,
+                to: nestedIndex
+            )
+            return true
+        } isTargeted: { targeted in
+            isDropTarget = targeted
+        }
     }
 
     private func colorForApp(_ name: String) -> Color {
