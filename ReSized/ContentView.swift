@@ -20,6 +20,8 @@ struct WindowDragData: Codable, Transferable {
 
 struct PermissionOverlay: View {
     var onGrantAccess: () -> Void
+    var onOpenSettings: () -> Void
+    var onRelaunch: () -> Void
 
     var body: some View {
         ZStack {
@@ -38,18 +40,54 @@ struct PermissionOverlay: View {
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: 260)
+                    .frame(maxWidth: 280)
 
                 Button("Grant Access") {
                     onGrantAccess()
                 }
                 .buttonStyle(.borderedProminent)
                 .padding(.top, 8)
+
+                // Escape hatches. macOS sometimes keeps reporting a process as
+                // untrusted until it restarts, even after the checkbox is ticked,
+                // so there has to be a way out of this overlay that isn't "quit
+                // and relaunch by hand".
+                HStack(spacing: 12) {
+                    Button("Open System Settings") {
+                        onOpenSettings()
+                    }
+                    Button("Already Granted — Relaunch") {
+                        onRelaunch()
+                    }
+                }
+                .controlSize(.small)
+
+                Text("If you've already granted access, relaunching makes macOS re-check.")
+                    .font(.caption2)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 280)
             }
             .padding(24)
             .background(Color(NSColor.windowBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .shadow(radius: 20)
+        }
+    }
+}
+
+/// Relaunches the app in place. Granting Accessibility does not always take
+/// effect for an already-running process.
+enum AppRelaunch {
+    static func now() {
+        let url = Bundle.main.bundleURL
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = true
+
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in
+            DispatchQueue.main.async {
+                NSApp.terminate(nil)
+            }
         }
     }
 }
@@ -136,10 +174,17 @@ struct ContentView: View {
                     .overlay {
                         // Show permission overlay first if needed
                         if !hasAccessibilityPermission {
-                            PermissionOverlay {
-                                AccessibilityHelper.requestAccessibilityPermissions()
-                                startPermissionPolling()
-                            }
+                            PermissionOverlay(
+                                onGrantAccess: {
+                                    AccessibilityHelper.requestAccessibilityPermissions()
+                                    startPermissionPolling()
+                                },
+                                onOpenSettings: {
+                                    AccessibilityHelper.openAccessibilityPreferences()
+                                    startPermissionPolling()
+                                },
+                                onRelaunch: { AppRelaunch.now() }
+                            )
                         }
                         // Then show trial expired overlay if applicable
                         else if case .trialExpired = licenseManager.licenseState {
@@ -175,18 +220,39 @@ struct ContentView: View {
         .onDisappear {
             permissionTimer?.invalidate()
         }
+        // Coming back from System Settings reactivates the app — cheaper and far
+        // more responsive than waiting for the next poll tick.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshPermissionState()
+        }
+    }
+
+    /// Re-read the trust state, and if we've just gained it, stop polling and scan.
+    @discardableResult
+    private func refreshPermissionState() -> Bool {
+        let trusted = AccessibilityHelper.checkAccessibilityPermissions()
+        guard trusted else { return false }
+
+        if !hasAccessibilityPermission {
+            hasAccessibilityPermission = true
+            _ = windowManager.scanExistingLayout()
+        }
+        permissionTimer?.invalidate()
+        permissionTimer = nil
+        return true
     }
 
     private func startPermissionPolling() {
         permissionTimer?.invalidate()
-        permissionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
-            if AccessibilityHelper.checkAccessibilityPermissions() {
-                timer.invalidate()
-                hasAccessibilityPermission = true
-                // Scan windows now that we have permission
-                _ = windowManager.scanExistingLayout()
-            }
+
+        // .common rather than Timer.scheduledTimer's default mode: the default
+        // one stops firing while a menu is open or a drag is tracking, which is
+        // exactly when someone is fiddling with permissions.
+        let timer = Timer(timeInterval: 1.0, repeats: true) { _ in
+            refreshPermissionState()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        permissionTimer = timer
     }
 }
 
