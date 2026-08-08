@@ -64,6 +64,11 @@ final class SeamOverlayView: NSView {
 
     private var activeSeam: DesktopSeam?
     private var dragOrigin: CGPoint = .zero
+    /// Where the pointer is right now during a drag. The indicator follows this
+    /// rather than the seam's computed position: the windows are still being
+    /// told to move and land a frame or two later, so a line drawn from their
+    /// frames trails the cursor the whole way.
+    private var dragPoint: CGPoint?
     private var hoveredIndex: Int?
 
     override var isFlipped: Bool { false }
@@ -102,14 +107,28 @@ final class SeamOverlayView: NSView {
 
         // Invisible until pointed at. A permanent grid of lines over every
         // window would be noise; the cursor already says the seam is there.
-        guard let hoveredIndex, hoveredIndex < seams.count else { return }
-
-        let rect = localSeamRects()[hoveredIndex]
+        guard let rect = indicatorRect() else { return }
         NSColor.controlAccentColor.withAlphaComponent(0.85).setFill()
-        let inset = seams[hoveredIndex].isVertical
-            ? rect.insetBy(dx: rect.width / 2 - 1.5, dy: 0)
-            : rect.insetBy(dx: 0, dy: rect.height / 2 - 1.5)
-        NSBezierPath(roundedRect: inset, xRadius: 1.5, yRadius: 1.5).fill()
+        NSBezierPath(roundedRect: rect, xRadius: 1.5, yRadius: 1.5).fill()
+    }
+
+    /// The line to draw: pinned to the pointer while dragging, otherwise
+    /// sitting on the hovered seam.
+    private func indicatorRect() -> CGRect? {
+        let thickness: CGFloat = 3
+
+        if let activeSeam, let dragPoint {
+            let extent = activeSeam.rect.offsetBy(dx: -screenOrigin.x, dy: -screenOrigin.y)
+            return activeSeam.isVertical
+                ? CGRect(x: dragPoint.x - thickness / 2, y: extent.minY, width: thickness, height: extent.height)
+                : CGRect(x: extent.minX, y: dragPoint.y - thickness / 2, width: extent.width, height: thickness)
+        }
+
+        guard let hoveredIndex, hoveredIndex < seams.count else { return nil }
+        let rect = localSeamRects()[hoveredIndex]
+        return seams[hoveredIndex].isVertical
+            ? rect.insetBy(dx: rect.width / 2 - thickness / 2, dy: 0)
+            : rect.insetBy(dx: 0, dy: rect.height / 2 - thickness / 2)
     }
 
     // MARK: Mouse
@@ -136,12 +155,15 @@ final class SeamOverlayView: NSView {
         activeSeam = seams[index]
         hoveredIndex = index
         dragOrigin = point
+        dragPoint = point
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard let activeSeam, activeSeam.trackSize > 0 else { return }
         let point = convert(event.locationInWindow, from: nil)
+        dragPoint = point
+        needsDisplay = true
 
         // Measured from where the gesture began, never accumulated. A delta
         // added on every event is applied 1+2+3+…+n times over a drag.
@@ -157,6 +179,8 @@ final class SeamOverlayView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         activeSeam = nil
+        dragPoint = nil
+        needsDisplay = true
     }
 
     // MARK: Tracking

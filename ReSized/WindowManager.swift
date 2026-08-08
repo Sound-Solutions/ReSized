@@ -1731,6 +1731,11 @@ class WindowManager {
         if layout.isActive {
             layout.expectedFrames = placed
             armEventSuppression(for: layout)
+            // The handles are positioned from those frames, so they have to be
+            // refreshed by every path that moves windows — not just the one
+            // that starts a layout. Without this they stayed wherever they were
+            // when the layout began.
+            refreshSeamOverlay(for: layout)
         }
     }
 
