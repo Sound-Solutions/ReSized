@@ -57,6 +57,16 @@ final class SeamOverlayView: NSView {
         }
     }
 
+    /// Where a modifier-dragged window would land, in screen coordinates.
+    /// Drawn stronger than the hover band: this one announces an action that
+    /// will happen on release, not a handle that could be grabbed.
+    var dropIndicator: (rect: CGRect, isVertical: Bool)? {
+        didSet {
+            guard dropIndicator?.rect != oldValue?.rect else { return }
+            needsDisplay = true
+        }
+    }
+
     /// Whether a screen point on a seam is actually showing this layout, and
     /// not some unmanaged window sitting on top of it. The panel floats above
     /// every ordinary window, so without this check the seams draw, grab and
@@ -111,6 +121,17 @@ final class SeamOverlayView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+
+        if let (rect, isVertical) = dropIndicator {
+            let band = rect.offsetBy(dx: -screenOrigin.x, dy: -screenOrigin.y)
+            NSColor.controlAccentColor.withAlphaComponent(0.35).setFill()
+            NSBezierPath(roundedRect: band, xRadius: 2, yRadius: 2).fill()
+            let centre: CGRect = isVertical
+                ? band.insetBy(dx: band.width / 2 - 1.5, dy: 0)
+                : band.insetBy(dx: 0, dy: band.height / 2 - 1.5)
+            NSColor.controlAccentColor.setFill()
+            NSBezierPath(roundedRect: centre, xRadius: 1.5, yRadius: 1.5).fill()
+        }
 
         // Invisible until pointed at. A permanent grid of lines over every
         // window would be noise; the cursor already says the seam is there.
