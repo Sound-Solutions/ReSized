@@ -98,9 +98,13 @@ extension WindowManager {
             )
         }
 
-        // Outer boundaries: before the first column/row, between each pair,
-        // after the last — a drop there makes a NEW column/row. Extents come
-        // from the tiles so they track what is really on screen.
+        // New-column/row boundaries at the two OUTERMOST edges only. Interior
+        // column boundaries used to be targets too, and their full-height bands
+        // out-competed every nearby cell seam — dragging into the middle of
+        // the grid kept spawning new skinny columns instead of inserting where
+        // the config window would. Inside the grid, the drop model is now
+        // exactly the config window's: cells and panes. Past the outer edge,
+        // and only there, a drop still means "new column/row".
         if columnsMode {
             var extents: [(index: Int, frame: CGRect)] = []
             for c in layout.columns.indices {
@@ -110,20 +114,17 @@ extension WindowManager {
                 extents.append((c, union))
             }
             guard let top = extents.map(\.frame.minY).min(),
-                  let bottom = extents.map(\.frame.maxY).max() else { return targets }
+                  let bottom = extents.map(\.frame.maxY).max(),
+                  let first = extents.first, let last = extents.last else { return targets }
             let height = bottom - top
-            for extent in extents {
-                targets.append(DesktopDropTarget(
-                    destination: .newColumn(index: extent.index),
-                    origin: CGPoint(x: extent.frame.minX, y: top), length: height, isVertical: true
-                ))
-            }
-            if let last = extents.last {
-                targets.append(DesktopDropTarget(
-                    destination: .newColumn(index: last.index + 1),
-                    origin: CGPoint(x: last.frame.maxX, y: top), length: height, isVertical: true
-                ))
-            }
+            targets.append(DesktopDropTarget(
+                destination: .newColumn(index: first.index),
+                origin: CGPoint(x: first.frame.minX, y: top), length: height, isVertical: true
+            ))
+            targets.append(DesktopDropTarget(
+                destination: .newColumn(index: last.index + 1),
+                origin: CGPoint(x: last.frame.maxX, y: top), length: height, isVertical: true
+            ))
         } else {
             var extents: [(index: Int, frame: CGRect)] = []
             for r in layout.rows.indices {
@@ -133,20 +134,17 @@ extension WindowManager {
                 extents.append((r, union))
             }
             guard let left = extents.map(\.frame.minX).min(),
-                  let right = extents.map(\.frame.maxX).max() else { return targets }
+                  let right = extents.map(\.frame.maxX).max(),
+                  let first = extents.first, let last = extents.last else { return targets }
             let width = right - left
-            for extent in extents {
-                targets.append(DesktopDropTarget(
-                    destination: .newRow(index: extent.index),
-                    origin: CGPoint(x: left, y: extent.frame.minY), length: width, isVertical: false
-                ))
-            }
-            if let last = extents.last {
-                targets.append(DesktopDropTarget(
-                    destination: .newRow(index: last.index + 1),
-                    origin: CGPoint(x: left, y: last.frame.maxY), length: width, isVertical: false
-                ))
-            }
+            targets.append(DesktopDropTarget(
+                destination: .newRow(index: first.index),
+                origin: CGPoint(x: left, y: first.frame.minY), length: width, isVertical: false
+            ))
+            targets.append(DesktopDropTarget(
+                destination: .newRow(index: last.index + 1),
+                origin: CGPoint(x: left, y: last.frame.maxY), length: width, isVertical: false
+            ))
         }
         return targets
     }
