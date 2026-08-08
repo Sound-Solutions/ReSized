@@ -277,6 +277,34 @@ struct WindowSlot: Equatable, Hashable {
     }
 }
 
+/// A draggable boundary on the real desktop.
+///
+/// The same idea as the preview's LayoutSeam, pointed at screen geometry: where
+/// the line is, which divider it moves, and the on-screen extent a drag has to
+/// be measured against — the model stores proportions, so pixels mean nothing
+/// without knowing what they are a fraction of.
+struct DesktopSeam {
+    enum Divider {
+        /// Between two columns, or two rows, at the top level.
+        case primary(index: Int)
+        /// Between two cells stacked in a column.
+        case cellInColumn(columnIndex: Int, index: Int)
+        /// Between two cells side by side in a row.
+        case cellInRow(rowIndex: Int, index: Int)
+        /// Between two panes of one cell's split.
+        case pane(cell: WindowSlot, index: Int)
+    }
+
+    var divider: Divider
+    /// In screen coordinates, already inset to a grabbable thickness.
+    var rect: CGRect
+    var isVertical: Bool
+    var trackSize: CGFloat
+    /// The two proportions this drag redistributes, read when it starts.
+    var initialFirst: CGFloat
+    var initialSecond: CGFloat
+}
+
 /// Where a dragged window will land. Every drop in the preview resolves to one
 /// of these — there is no "onto this thing" case, only "at this seam".
 enum SeamDestination: Equatable {
@@ -376,6 +404,8 @@ class MonitorLayout {
     /// dozens of times a second for no visible reason.
     @ObservationIgnored var windowObserver: WindowObserver?
     @ObservationIgnored var expectedFrames: [UUID: CGRect] = [:]
+    /// The draggable seams drawn over this monitor while the layout is live.
+    @ObservationIgnored var seamOverlay: SeamOverlayWindow?
 
     /// Move/resize notifications caused by our own layout writes arrive on the run
     /// loop *after* the write returns, so a synchronous "am I applying" flag never
@@ -2113,6 +2143,233 @@ class WindowManager {
     }
 
 
+    /// Put the seam handles on screen for a live layout, and keep them where
+    /// the windows are.
+    ///
+    /// Rebuilt after every apply rather than tracked incrementally: the frames
+    /// they are derived from are refreshed by the same pass, so recomputing is
+    /// both simpler and impossible to get out of step.
+    func refreshSeamOverlay(for layout: MonitorLayout) {
+        guard layout.isActive else {
+            hideSeamOverlay(for: layout)
+            return
+        }
+
+        if layout.seamOverlay == nil {
+            // The live screen if the monitor is still connected, otherwise the
+            // one captured when the layout was made.
+            let screen = availableMonitors.first { $0.id == layout.monitorId }?.screen ?? layout.screen
+            let overlay = SeamOverlayWindow(screen: screen)
+            overlay.seamView?.onDrag = { [weak self] seam, translation in
+                self?.dragDesktopSeam(seam, proportionalTranslation: translation)
+            }
+            overlay.orderFront(nil)
+            layout.seamOverlay = overlay
+        }
+
+        layout.seamOverlay?.seamView?.seams = desktopSeams(for: layout)
+    }
+
+    func hideSeamOverlay(for layout: MonitorLayout) {
+        layout.seamOverlay?.orderOut(nil)
+        layout.seamOverlay = nil
+    }
+
+    /// Union that tolerates a missing first term, for folding a list of frames.
+    private func union(_ accumulated: CGRect?, _ next: CGRect) -> CGRect {
+        accumulated.map { $0.union(next) } ?? next
+    }
+
+    // MARK: - Desktop Seams
+
+    /// How thick a seam is to grab, in points.
+    static let seamGrabThickness: CGFloat = 10
+
+    /// Every draggable boundary in a live layout, positioned from where the
+    /// windows actually are.
+    ///
+    /// Derived from expectedFrames rather than recomputed from the proportions,
+    /// for the same reason the preview derives its seams from the tiles' real
+    /// frames: apps refuse the sizes they are given, and a handle drawn where a
+    /// window was *asked* to be would sit off the edge it is supposed to move.
+    func desktopSeams(for layout: MonitorLayout) -> [DesktopSeam] {
+        var seams: [DesktopSeam] = []
+        let bounds = layout.containerBounds
+        guard bounds.width > 0, bounds.height > 0 else { return seams }
+
+        func frame(_ id: UUID) -> CGRect? { layout.expectedFrames[id] }
+
+        /// The seam between two adjacent frames, centred on the gap between
+        /// them so it stays grabbable even when they are flush.
+        func seam(
+            between first: CGRect,
+            and second: CGRect,
+            vertical: Bool,
+            divider: DesktopSeam.Divider,
+            trackSize: CGFloat,
+            proportions: (CGFloat, CGFloat)
+        ) -> DesktopSeam {
+            let half = Self.seamGrabThickness / 2
+            let rect: CGRect
+            if vertical {
+                let x = (first.maxX + second.minX) / 2
+                let top = max(first.maxY, second.maxY)
+                let bottom = min(first.minY, second.minY)
+                rect = CGRect(x: x - half, y: bottom, width: Self.seamGrabThickness, height: max(0, top - bottom))
+            } else {
+                // Screen coordinates grow upward, so the earlier sibling in a
+                // column is the higher one.
+                let y = (first.minY + second.maxY) / 2
+                let left = min(first.minX, second.minX)
+                let right = max(first.maxX, second.maxX)
+                rect = CGRect(x: left, y: y - half, width: max(0, right - left), height: Self.seamGrabThickness)
+            }
+            return DesktopSeam(
+                divider: divider, rect: rect, isVertical: vertical, trackSize: trackSize,
+                initialFirst: proportions.0, initialSecond: proportions.1
+            )
+        }
+
+        /// Seams between the panes of one cell's split.
+        func paneSeams(for container: LayoutContainer, cell: WindowSlot) {
+            let vertical = container.direction == .horizontal
+            let track = splitTrackSize(in: layout, slot: cell, direction: container.direction)
+            guard track > 0 else { return }
+
+            for index in 0..<max(0, container.children.count - 1) {
+                guard let a = frame(container.children[index].id),
+                      let b = frame(container.children[index + 1].id) else { continue }
+                seams.append(seam(
+                    between: a, and: b, vertical: vertical,
+                    divider: .pane(cell: cell, index: index),
+                    trackSize: track,
+                    proportions: (container.children[index].proportion,
+                                  container.children[index + 1].proportion)
+                ))
+            }
+        }
+
+        switch layout.layoutMode {
+        case .columns:
+            for (columnIndex, column) in layout.columns.enumerated() {
+                for (cellIndex, cell) in column.windows.enumerated() {
+                    if let container = cell.nestedContainer {
+                        paneSeams(for: container, cell: WindowSlot(
+                            columnIndex: columnIndex, rowIndex: nil, windowIndex: cellIndex, nestedIndex: nil
+                        ))
+                    }
+                    guard cellIndex + 1 < column.windows.count,
+                          let a = frame(cell.id),
+                          let b = frame(column.windows[cellIndex + 1].id) else { continue }
+                    seams.append(seam(
+                        between: a, and: b, vertical: false,
+                        divider: .cellInColumn(columnIndex: columnIndex, index: cellIndex),
+                        trackSize: bounds.height,
+                        proportions: (cell.heightProportion, column.windows[cellIndex + 1].heightProportion)
+                    ))
+                }
+
+                guard columnIndex + 1 < layout.columns.count,
+                      let a = columnBounds(layout.columns[columnIndex], frame),
+                      let b = columnBounds(layout.columns[columnIndex + 1], frame) else { continue }
+                seams.append(seam(
+                    between: a, and: b, vertical: true,
+                    divider: .primary(index: columnIndex),
+                    trackSize: bounds.width,
+                    proportions: (column.widthProportion, layout.columns[columnIndex + 1].widthProportion)
+                ))
+            }
+
+        case .rows:
+            for (rowIndex, row) in layout.rows.enumerated() {
+                for (cellIndex, cell) in row.windows.enumerated() {
+                    if let container = cell.nestedContainer {
+                        paneSeams(for: container, cell: WindowSlot(
+                            columnIndex: nil, rowIndex: rowIndex, windowIndex: cellIndex, nestedIndex: nil
+                        ))
+                    }
+                    guard cellIndex + 1 < row.windows.count,
+                          let a = frame(cell.id),
+                          let b = frame(row.windows[cellIndex + 1].id) else { continue }
+                    seams.append(seam(
+                        between: a, and: b, vertical: true,
+                        divider: .cellInRow(rowIndex: rowIndex, index: cellIndex),
+                        trackSize: bounds.width,
+                        proportions: (cell.widthProportion, row.windows[cellIndex + 1].widthProportion)
+                    ))
+                }
+
+                guard rowIndex + 1 < layout.rows.count,
+                      let a = rowBounds(layout.rows[rowIndex], frame),
+                      let b = rowBounds(layout.rows[rowIndex + 1], frame) else { continue }
+                seams.append(seam(
+                    between: a, and: b, vertical: false,
+                    divider: .primary(index: rowIndex),
+                    trackSize: bounds.height,
+                    proportions: (row.heightProportion, layout.rows[rowIndex + 1].heightProportion)
+                ))
+            }
+        }
+
+        return seams
+    }
+
+    /// The area a column covers, as the union of what its cells actually got.
+    private func columnBounds(_ column: Column, _ frame: (UUID) -> CGRect?) -> CGRect? {
+        column.windows.compactMap { cell -> CGRect? in
+            frame(cell.id) ?? cell.nestedContainer?.children.compactMap { frame($0.id) }.reduce(nil, union)
+        }.reduce(nil, union)
+    }
+
+    private func rowBounds(_ row: Row, _ frame: (UUID) -> CGRect?) -> CGRect? {
+        row.windows.compactMap { cell -> CGRect? in
+            frame(cell.id) ?? cell.nestedContainer?.children.compactMap { frame($0.id) }.reduce(nil, union)
+        }.reduce(nil, union)
+    }
+
+    /// Apply a divider drag that started on the desktop, in the same terms the
+    /// preview's handles use.
+    func dragDesktopSeam(_ seam: DesktopSeam, proportionalTranslation: CGFloat) {
+        switch seam.divider {
+        case .primary(let index):
+            switch layoutMode {
+            case .columns:
+                resizeColumnDivider(atIndex: index, initialFirst: seam.initialFirst,
+                                    initialSecond: seam.initialSecond,
+                                    proportionalTranslation: proportionalTranslation)
+            case .rows:
+                resizeRowPrimaryDivider(atIndex: index, initialFirst: seam.initialFirst,
+                                        initialSecond: seam.initialSecond,
+                                        proportionalTranslation: proportionalTranslation)
+            }
+
+        case .cellInColumn(let columnIndex, let index):
+            resizeRowDivider(inColumn: columnIndex, atIndex: index, initialFirst: seam.initialFirst,
+                             initialSecond: seam.initialSecond,
+                             proportionalTranslation: proportionalTranslation)
+
+        case .cellInRow(let rowIndex, let index):
+            resizeWindowDivider(inRow: rowIndex, atIndex: index, initialFirst: seam.initialFirst,
+                                initialSecond: seam.initialSecond,
+                                proportionalTranslation: proportionalTranslation)
+
+        case .pane(let cell, let index):
+            if let columnIndex = cell.columnIndex {
+                resizeNestedColumnDividerFromInitial(
+                    columnIndex: columnIndex, windowIndex: cell.windowIndex, dividerIndex: index,
+                    initialProp1: seam.initialFirst, initialProp2: seam.initialSecond,
+                    proportionalTranslation: proportionalTranslation
+                )
+            } else if let rowIndex = cell.rowIndex {
+                resizeNestedRowDividerFromInitial(
+                    rowIndex: rowIndex, windowIndex: cell.windowIndex, dividerIndex: index,
+                    initialProp1: seam.initialFirst, initialProp2: seam.initialSecond,
+                    proportionalTranslation: proportionalTranslation
+                )
+            }
+        }
+    }
+
     // MARK: - Seam Placement
 
     /// Put the dragged window at a seam.
@@ -2771,6 +3028,7 @@ class WindowManager {
         // Stop window observer
         layout.windowObserver?.stopObserving()
         layout.windowObserver = nil
+        hideSeamOverlay(for: layout)
 
         layout.expectedFrames.removeAll()
         stopMaintenanceTimerIfIdle()
@@ -2823,6 +3081,7 @@ class WindowManager {
             // Stop window observer
             layout.windowObserver?.stopObserving()
             layout.windowObserver = nil
+            hideSeamOverlay(for: layout)
 
             layout.expectedFrames.removeAll()
         }
@@ -2980,6 +3239,7 @@ class WindowManager {
         // resize and no longer triggers a corrective re-apply.
         layout.expectedFrames = applyLayoutForMonitor(layout)
         armEventSuppression(for: layout)
+        refreshSeamOverlay(for: layout)
     }
 
     /// Briefly ignore incoming move/resize notifications, so the windows we just
