@@ -74,6 +74,16 @@ struct PermissionOverlay: View {
     }
 }
 
+extension NSWindow {
+    /// Whether this is the main config window, as opposed to Settings, the
+    /// highlight ring, or one of SwiftUI's transient helper windows.
+    /// Mirrors the lookup AppDelegate.showConfig uses.
+    var isConfigWindow: Bool {
+        guard !(self is MonitorHighlightWindow) else { return false }
+        return identifier?.rawValue == "main" || title == "ReSized"
+    }
+}
+
 /// Relaunches the app in place. Granting Accessibility does not always take
 /// effect for an already-running process.
 enum AppRelaunch {
@@ -222,13 +232,15 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshPermissionState()
         }
-        // Belt and braces for the highlight ring. onDisappear is not dependable
-        // for a SwiftUI Window scene closed with the red X on macOS, and leaving
-        // a borderless always-on-top rectangle stranded on the desktop is a much
-        // worse failure than hiding it once too often.
+        // Belt and braces for the highlight ring: onDisappear is not dependable
+        // for a SwiftUI Window scene closed with the red X on macOS.
+        //
+        // Must match only the config window. SwiftUI keeps transient helper
+        // windows around (a zero-size one shows up right after launch), and
+        // reacting to any close at all tore the ring down seconds into the
+        // session while the config window was still sitting there open.
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { note in
-            guard let closing = note.object as? NSWindow,
-                  !(closing is MonitorHighlightWindow) else { return }
+            guard let closing = note.object as? NSWindow, closing.isConfigWindow else { return }
             windowManager.isConfigWindowVisible = false
         }
     }
