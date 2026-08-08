@@ -254,14 +254,16 @@ struct SeamDropDelegate: DropDelegate {
 
     func dropEntered(info: DropInfo) {
         state.highlighted = nearestSeam(to: info.location)
-        state.watchForDragEnd(
-            clearHighlight: { [state] in state.highlighted = nil },
-            clearDrag: { [windowManager] in windowManager.pendingDrag = nil }
-        )
+        armDragEndWatch()
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         state.highlighted = nearestSeam(to: info.location)
+        // Also armed here, not just on entry. A drop stops the watch, and the
+        // next drag begins with the pointer already inside the grid — so
+        // dropEntered is never sent again and every drag after the first one
+        // would set a highlight with nothing watching for its end.
+        armDragEndWatch()
         // .copy, not .move. A SwiftUI onDrag session does not advertise move,
         // and proposing an operation the source never offered leaves the drag
         // looking live right up to release and then refuses it.
@@ -284,6 +286,13 @@ struct SeamDropDelegate: DropDelegate {
 
         windowManager.place(drag, at: seam.destination)
         return true
+    }
+
+    private func armDragEndWatch() {
+        state.watchForDragEnd(
+            clearHighlight: { [state] in state.highlighted = nil },
+            clearDrag: { [windowManager] in windowManager.pendingDrag = nil }
+        )
     }
 
     private func nearestSeam(to point: CGPoint) -> LayoutSeam? {
