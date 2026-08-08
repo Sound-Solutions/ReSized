@@ -349,8 +349,7 @@ extension WindowManager {
 
     /// Current window-server bounds (top-left coords) for one window.
     private func windowServerBounds(of windowID: CGWindowID) -> CGRect? {
-        guard let entries = CGWindowListCreateDescriptionFromArray([windowID] as CFArray) as? [[String: Any]],
-              let entry = entries.first,
+        guard let entry = windowServerDescription(of: windowID),
               let boundsDict = entry[kCGWindowBounds as String] as? [String: Any]
         else { return nil }
         return CGRect(dictionaryRepresentation: boundsDict as CFDictionary)

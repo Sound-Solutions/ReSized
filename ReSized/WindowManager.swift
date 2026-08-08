@@ -3553,6 +3553,24 @@ class WindowManager {
         applyLayoutAndUpdateExpected(for: layout)
     }
 
+    /// One window's description straight from the window server, nil when the
+    /// server doesn't know the id.
+    ///
+    /// CGWindowListCreateDescriptionFromArray requires a callback-free CFArray
+    /// whose elements ARE the ids cast to pointers. A Swift-bridged NSNumber
+    /// array type-checks, compiles, and returns an empty array for every
+    /// window that exists — which read as "closed" for live windows and
+    /// dismantled layouts on every AX hiccup. Verified empirically on macOS
+    /// 26.3: bridged form 0 entries for an on-screen window, this form 1, and
+    /// 0 for a bogus id. Nothing else may call the API directly.
+    func windowServerDescription(of windowID: CGWindowID) -> [String: Any]? {
+        var pointer = UnsafeRawPointer(bitPattern: UInt(windowID))
+        guard pointer != nil else { return nil }
+        let array = CFArrayCreate(nil, &pointer, 1, nil)
+        let descriptions = CGWindowListCreateDescriptionFromArray(array) as? [[String: Any]]
+        return descriptions?.first
+    }
+
     /// Whether the window server's answers can be believed right now.
     ///
     /// Locked or off-console sessions get empty answers for every window in
@@ -3578,10 +3596,7 @@ class WindowManager {
             sentinel > 0
         else { return true }
 
-        let descriptions = CGWindowListCreateDescriptionFromArray(
-            [CGWindowID(sentinel)] as CFArray
-        ) as? [[String: Any]]
-        if descriptions?.isEmpty ?? true {
+        if windowServerDescription(of: CGWindowID(sentinel)) == nil {
             AccessibilityHelper.logDebug("sweep skipped: window server cannot see our own overlay")
             return false
         }
@@ -3603,13 +3618,11 @@ class WindowManager {
             return true
         }
 
-        guard let windowID = window.windowID,
-              let descriptions = CGWindowListCreateDescriptionFromArray([windowID] as CFArray) as? [[String: Any]]
-        else {
-            AccessibilityHelper.logDebug("frame unreadable, kept (no wid/desc): \(window.ownerName) '\(window.title)'")
+        guard let windowID = window.windowID else {
+            AccessibilityHelper.logDebug("frame unreadable, kept (no wid): \(window.ownerName) '\(window.title)'")
             return false
         }
-        if descriptions.isEmpty {
+        if windowServerDescription(of: windowID) == nil {
             AccessibilityHelper.logDebug("gone(server): \(window.ownerName) '\(window.title)' wid=\(windowID)")
             return true
         }
