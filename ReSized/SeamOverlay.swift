@@ -73,17 +73,24 @@ final class SeamOverlayView: NSView {
     /// swallow clicks straight through whatever is covering the tiled windows.
     var isPointExposed: ((CGPoint) -> Bool)?
 
-    /// Called continuously while a seam is dragged, with the drag so far as a
-    /// fraction of the seam's track.
-    var onDrag: ((DesktopSeam, CGFloat) -> Void)?
+    /// Called once, on mouse-up, with the final shift as a fraction of the
+    /// seam's track. The windows do not move until then — the same deferred
+    /// commit as the config window's dividers, and for the same reason:
+    /// applying on every event races apps' asynchronous resizes and buries
+    /// the main thread in AX round trips. This has regressed to live-follow
+    /// before; it must not again.
+    var onCommit: ((DesktopSeam, CGFloat) -> Void)?
+
+    /// Asks how much of a requested shift the split behind the seam can
+    /// actually absorb, so the band stops where the windows will stop.
+    var clampShift: ((DesktopSeam, CGFloat) -> CGFloat)?
 
     private var activeSeam: DesktopSeam?
     private var dragOrigin: CGPoint = .zero
-    /// Where the pointer is right now during a drag. The indicator follows this
-    /// rather than the seam's computed position: the windows are still being
-    /// told to move and land a frame or two later, so a line drawn from their
-    /// frames trails the cursor the whole way.
-    private var dragPoint: CGPoint?
+    /// The drag so far, clamped, as a fraction of the seam's track. The band
+    /// is drawn from this rather than the raw cursor so it never travels
+    /// somewhere the layout won't follow on release.
+    private var activeShift: CGFloat = 0
     private var hoveredIndex: Int?
 
     override var isFlipped: Bool { false }
@@ -151,15 +158,17 @@ final class SeamOverlayView: NSView {
         NSBezierPath(roundedRect: centre, xRadius: 1.5, yRadius: 1.5).fill()
     }
 
-    /// What to draw: pinned to the pointer while dragging, otherwise the
-    /// hovered seam's own strip.
+    /// What to draw: the grabbed seam's strip displaced by the clamped shift
+    /// while dragging, otherwise the hovered seam's own strip.
     private func indicator() -> (band: CGRect, isVertical: Bool)? {
-        if let activeSeam, let dragPoint {
+        if let activeSeam {
             let extent = activeSeam.rect.offsetBy(dx: -screenOrigin.x, dy: -screenOrigin.y)
-            let thickness = activeSeam.isVertical ? extent.width : extent.height
+            // A positive shift grows the first of the pair: rightward for a
+            // vertical seam, downward (negative y on screen) for a horizontal
+            // one — the same sign convention the commit uses.
             let band = activeSeam.isVertical
-                ? CGRect(x: dragPoint.x - thickness / 2, y: extent.minY, width: thickness, height: extent.height)
-                : CGRect(x: extent.minX, y: dragPoint.y - thickness / 2, width: extent.width, height: thickness)
+                ? extent.offsetBy(dx: activeShift * activeSeam.trackSize, dy: 0)
+                : extent.offsetBy(dx: 0, dy: -activeShift * activeSeam.trackSize)
             return (band, activeSeam.isVertical)
         }
 
@@ -202,15 +211,13 @@ final class SeamOverlayView: NSView {
         activeSeam = seams[index]
         hoveredIndex = index
         dragOrigin = point
-        dragPoint = point
+        activeShift = 0
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard let activeSeam, activeSeam.trackSize > 0 else { return }
         let point = convert(event.locationInWindow, from: nil)
-        dragPoint = point
-        needsDisplay = true
 
         // Measured from where the gesture began, never accumulated. A delta
         // added on every event is applied 1+2+3+…+n times over a drag.
@@ -221,12 +228,17 @@ final class SeamOverlayView: NSView {
             // the first of the pair.
             : dragOrigin.y - point.y
 
-        onDrag?(activeSeam, travelled / activeSeam.trackSize)
+        let requested = travelled / activeSeam.trackSize
+        activeShift = clampShift?(activeSeam, requested) ?? requested
+        needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
+        if let activeSeam, abs(activeShift) > 0.0001 {
+            onCommit?(activeSeam, activeShift)
+        }
         activeSeam = nil
-        dragPoint = nil
+        activeShift = 0
         needsDisplay = true
     }
 
