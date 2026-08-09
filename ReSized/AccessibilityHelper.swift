@@ -363,6 +363,34 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
         return resolved
     }
 
+    /// Where this window has actually dug in when asked to shrink. Apps that
+    /// report no AXMinimumSize (Webex) still refuse below some size; the only
+    /// way to know it is to notice.
+    private var observedFloor: CGSize = .zero
+
+    /// The real smallest size to plan around: the reported minimum or the
+    /// observed refusal floor, whichever is larger. Costs no AX call.
+    var effectiveMinSize: CGSize {
+        CGSize(width: max(minSize.width, observedFloor.width),
+               height: max(minSize.height, observedFloor.height))
+    }
+
+    /// Learn from what a placement actually produced. Landing bigger than
+    /// asked ratchets the floor up to where the window dug in; ever landing
+    /// smaller relaxes it back down — apps change their minimums with state.
+    func noteAppliedSize(asked: CGSize, got: CGSize) {
+        if got.width > asked.width + 10 {
+            observedFloor.width = got.width
+        } else if got.width < observedFloor.width {
+            observedFloor.width = got.width
+        }
+        if got.height > asked.height + 10 {
+            observedFloor.height = got.height
+        } else if got.height < observedFloor.height {
+            observedFloor.height = got.height
+        }
+    }
+
     /// Forget the cached min/max so the next read asks the app again.
     ///
     /// The cache assumed a window's limits are fixed for life. Webex's are

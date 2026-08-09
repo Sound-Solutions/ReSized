@@ -1682,20 +1682,41 @@ class WindowManager {
     ///
     /// Divider handles use this to slide exactly as far as the drag will really
     /// move things, so the line never travels somewhere the layout won't follow.
-    static func achievableShift(first: CGFloat, second: CGFloat, requested: CGFloat) -> CGFloat {
-        guard let (newFirst, _) = resolveSplit(first: first, second: second, delta: requested) else {
-            return 0
-        }
+    static func achievableShift(
+        first: CGFloat, second: CGFloat, requested: CGFloat,
+        minFirst: CGFloat = minPaneProportion, minSecond: CGFloat = minPaneProportion
+    ) -> CGFloat {
+        guard let (newFirst, _) = resolveSplit(
+            first: first, second: second, delta: requested,
+            minFirst: minFirst, minSecond: minSecond
+        ) else { return 0 }
         return newFirst - first
     }
 
     /// Shift `delta` out of the second pane and into the first, clamping at the
-    /// minimum rather than rejecting the whole gesture. Returns nil if there
+    /// minimums rather than rejecting the whole gesture. Returns nil if there
     /// isn't room for two panes at all.
-    static func resolveSplit(first: CGFloat, second: CGFloat, delta: CGFloat) -> (CGFloat, CGFloat)? {
+    ///
+    /// `minFirst`/`minSecond` are each side's own floor — derived from the
+    /// windows' real (reported or observed) minimum sizes — so a divider stops
+    /// where the window behind it stops instead of sliding on without it.
+    static func resolveSplit(
+        first: CGFloat, second: CGFloat, delta: CGFloat,
+        minFirst: CGFloat = minPaneProportion, minSecond: CGFloat = minPaneProportion
+    ) -> (CGFloat, CGFloat)? {
         let total = first + second
         guard total > minPaneProportion * 2 else { return nil }
-        let clamped = min(max(first + delta, minPaneProportion), total - minPaneProportion)
+
+        let firstFloor = max(minPaneProportion, minFirst)
+        let secondFloor = max(minPaneProportion, minSecond)
+        // Two stubborn windows in a track too small for both floors: fall
+        // back to the generic clamp rather than freezing the divider solid.
+        guard firstFloor + secondFloor < total else {
+            let clamped = min(max(first + delta, minPaneProportion), total - minPaneProportion)
+            return (clamped, total - clamped)
+        }
+
+        let clamped = min(max(first + delta, firstFloor), total - secondFloor)
         return (clamped, total - clamped)
     }
 
@@ -1707,6 +1728,47 @@ class WindowManager {
     private func applyLayoutIfActive() {
         guard isActive else { return }
         applyLayout()
+    }
+
+    // MARK: Divider floors from real window minimums
+
+    /// The narrowest a cell can go, in points — its window's effective
+    /// minimum, or for a split whatever its panes need together. Minimized
+    /// windows take no space and impose nothing.
+    private func cellMinWidth(_ window: ExternalWindow?, _ container: LayoutContainer?) -> CGFloat {
+        if let window { return window.isMinimized ? 0 : window.effectiveMinSize.width }
+        guard let container else { return 0 }
+        let mins = container.children.filter { !$0.window.isMinimized }
+            .map { $0.window.effectiveMinSize.width }
+        return container.direction == .horizontal ? mins.reduce(0, +) : (mins.max() ?? 0)
+    }
+
+    private func cellMinHeight(_ window: ExternalWindow?, _ container: LayoutContainer?) -> CGFloat {
+        if let window { return window.isMinimized ? 0 : window.effectiveMinSize.height }
+        guard let container else { return 0 }
+        let mins = container.children.filter { !$0.window.isMinimized }
+            .map { $0.window.effectiveMinSize.height }
+        return container.direction == .vertical ? mins.reduce(0, +) : (mins.max() ?? 0)
+    }
+
+    /// A pixel floor as a share of a track, for feeding resolveSplit.
+    private func floorProportion(_ points: CGFloat, ofTrack track: CGFloat) -> CGFloat {
+        track > 0 ? points / track : Self.minPaneProportion
+    }
+
+    /// One pane's floor as a share of its split's on-screen track.
+    private func paneFloor(_ container: LayoutContainer, _ index: Int, cell: WindowSlot) -> CGFloat {
+        guard let layout = currentLayout, container.children.indices.contains(index) else {
+            return Self.minPaneProportion
+        }
+        let window = container.children[index].window
+        guard !window.isMinimized else { return 0 }
+        let points = container.direction == .horizontal
+            ? window.effectiveMinSize.width
+            : window.effectiveMinSize.height
+        return floorProportion(
+            points, ofTrack: splitTrackSize(in: layout, slot: cell, direction: container.direction)
+        )
     }
 
     /// Resize a column divider (between columnIndex and columnIndex+1).
@@ -1725,10 +1787,19 @@ class WindowManager {
     ) {
         guard dividerIndex >= 0, dividerIndex + 1 < columns.count else { return }
 
+        let track = currentLayout?.containerBounds.width ?? 0
+        func columnFloor(_ column: Column) -> CGFloat {
+            floorProportion(
+                column.windows.map { cellMinWidth($0.window, $0.nestedContainer) }.max() ?? 0,
+                ofTrack: track
+            )
+        }
         guard let (left, right) = Self.resolveSplit(
             first: initialFirst,
             second: initialSecond,
-            delta: proportionalTranslation
+            delta: proportionalTranslation,
+            minFirst: columnFloor(columns[dividerIndex]),
+            minSecond: columnFloor(columns[dividerIndex + 1])
         ) else { return }
 
         var updated = columns
@@ -1752,10 +1823,15 @@ class WindowManager {
         guard columnIndex >= 0, columnIndex < columns.count else { return }
         guard dividerIndex >= 0, dividerIndex + 1 < columns[columnIndex].windows.count else { return }
 
+        let track = currentLayout?.containerBounds.height ?? 0
+        let cellA = columns[columnIndex].windows[dividerIndex]
+        let cellB = columns[columnIndex].windows[dividerIndex + 1]
         guard let (top, bottom) = Self.resolveSplit(
             first: initialFirst,
             second: initialSecond,
-            delta: proportionalTranslation
+            delta: proportionalTranslation,
+            minFirst: floorProportion(cellMinHeight(cellA.window, cellA.nestedContainer), ofTrack: track),
+            minSecond: floorProportion(cellMinHeight(cellB.window, cellB.nestedContainer), ofTrack: track)
         ) else { return }
 
         var updated = columns
@@ -1778,10 +1854,19 @@ class WindowManager {
     ) {
         guard dividerIndex >= 0, dividerIndex + 1 < rows.count else { return }
 
+        let track = currentLayout?.containerBounds.height ?? 0
+        func rowFloor(_ row: Row) -> CGFloat {
+            floorProportion(
+                row.windows.map { cellMinHeight($0.window, $0.nestedContainer) }.max() ?? 0,
+                ofTrack: track
+            )
+        }
         guard let (top, bottom) = Self.resolveSplit(
             first: initialFirst,
             second: initialSecond,
-            delta: proportionalTranslation
+            delta: proportionalTranslation,
+            minFirst: rowFloor(rows[dividerIndex]),
+            minSecond: rowFloor(rows[dividerIndex + 1])
         ) else { return }
 
         var updated = rows
@@ -1805,10 +1890,15 @@ class WindowManager {
         guard rowIndex >= 0, rowIndex < rows.count else { return }
         guard dividerIndex >= 0, dividerIndex + 1 < rows[rowIndex].windows.count else { return }
 
+        let track = currentLayout?.containerBounds.width ?? 0
+        let cellA = rows[rowIndex].windows[dividerIndex]
+        let cellB = rows[rowIndex].windows[dividerIndex + 1]
         guard let (left, right) = Self.resolveSplit(
             first: initialFirst,
             second: initialSecond,
-            delta: proportionalTranslation
+            delta: proportionalTranslation,
+            minFirst: floorProportion(cellMinWidth(cellA.window, cellA.nestedContainer), ofTrack: track),
+            minSecond: floorProportion(cellMinWidth(cellB.window, cellB.nestedContainer), ofTrack: track)
         ) else { return }
 
         var updated = rows
@@ -2977,7 +3067,13 @@ class WindowManager {
         guard let (prop1, prop2) = Self.resolveSplit(
             first: initialProp1,
             second: initialProp2,
-            delta: proportionalTranslation
+            delta: proportionalTranslation,
+            minFirst: paneFloor(container, dividerIndex,
+                                cell: WindowSlot(columnIndex: columnIndex, rowIndex: nil,
+                                                 windowIndex: windowIndex, nestedIndex: nil)),
+            minSecond: paneFloor(container, dividerIndex + 1,
+                                 cell: WindowSlot(columnIndex: columnIndex, rowIndex: nil,
+                                                  windowIndex: windowIndex, nestedIndex: nil))
         ) else { return }
 
         container.children[dividerIndex].proportion = prop1
@@ -3014,7 +3110,13 @@ class WindowManager {
         guard let (prop1, prop2) = Self.resolveSplit(
             first: initialProp1,
             second: initialProp2,
-            delta: proportionalTranslation
+            delta: proportionalTranslation,
+            minFirst: paneFloor(container, dividerIndex,
+                                cell: WindowSlot(columnIndex: nil, rowIndex: rowIndex,
+                                                 windowIndex: windowIndex, nestedIndex: nil)),
+            minSecond: paneFloor(container, dividerIndex + 1,
+                                 cell: WindowSlot(columnIndex: nil, rowIndex: rowIndex,
+                                                  windowIndex: windowIndex, nestedIndex: nil))
         ) else { return }
 
         container.children[dividerIndex].proportion = prop1
@@ -3405,6 +3507,12 @@ class WindowManager {
                 actualAX = second
             }
         }
+
+        // What the window actually did teaches its real floor — the seam
+        // clamps read effectiveMinSize, so a divider stops where the window
+        // will stop instead of sliding past it.
+        window.noteAppliedSize(asked: targetAX.size, got: actualAX.size)
+
         return convertFrameFromAXCoordinates(actualAX)
     }
 
