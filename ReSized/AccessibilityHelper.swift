@@ -288,14 +288,38 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
         guard let positionValue = AXValueCreate(.cgPoint, &pos),
               let sizeValue = AXValueCreate(.cgSize, &sz) else { return false }
 
-        // Position, then size, then position again. The window server clamps a
-        // requested size against whichever display the window currently occupies,
-        // so a single position+size pass lands short whenever a window is moving
-        // to a larger display or growing past the bounds of its current screen.
-        // The second position call re-seats it once the size has been accepted.
-        let firstPos = AXUIElementSetAttributeValue(axElement, kAXPositionAttribute as CFString, positionValue)
-        let sizeResult = AXUIElementSetAttributeValue(axElement, kAXSizeAttribute as CFString, sizeValue)
-        let secondPos = AXUIElementSetAttributeValue(axElement, kAXPositionAttribute as CFString, positionValue)
+        // Write order decides what the INTERMEDIATE state looks like, and
+        // slow appliers (Webex, Messages) hold that state long enough to see.
+        // Position-first on a rightward shrink means "new position, old
+        // size" for a beat — right edge past the usable area, under the
+        // Dock, sixty times a second during a live drag ("allowing the
+        // windows to go under it and then bounce back").
+        //
+        // So: a shrink writes SIZE first — a shrink applied at the old
+        // position stays inside the old footprint and can never transiently
+        // overhang the Dock or a neighbour. Grows keep position-first: the
+        // old size at the new position is contained in the new footprint,
+        // and the window server clamps a requested size against whichever
+        // display the window currently occupies, so a window heading to a
+        // larger display must move before it can grow. The trailing write
+        // of the leading attribute re-seats whichever half the app applied
+        // second.
+        let shrinking = newFrame.width < frame.width - 1 && newFrame.height <= frame.height + 1
+            || newFrame.height < frame.height - 1 && newFrame.width <= frame.width + 1
+
+        let firstPos: AXError
+        let sizeResult: AXError
+        let secondPos: AXError
+        if shrinking {
+            sizeResult = AXUIElementSetAttributeValue(axElement, kAXSizeAttribute as CFString, sizeValue)
+            firstPos = AXUIElementSetAttributeValue(axElement, kAXPositionAttribute as CFString, positionValue)
+            _ = AXUIElementSetAttributeValue(axElement, kAXSizeAttribute as CFString, sizeValue)
+            secondPos = firstPos
+        } else {
+            firstPos = AXUIElementSetAttributeValue(axElement, kAXPositionAttribute as CFString, positionValue)
+            sizeResult = AXUIElementSetAttributeValue(axElement, kAXSizeAttribute as CFString, sizeValue)
+            secondPos = AXUIElementSetAttributeValue(axElement, kAXPositionAttribute as CFString, positionValue)
+        }
 
         let positionSet = firstPos == .success || secondPos == .success
         let sizeSet = sizeResult == .success
