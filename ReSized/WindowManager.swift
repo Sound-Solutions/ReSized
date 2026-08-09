@@ -628,6 +628,7 @@ class WindowManager {
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
             .sink { [weak self] _ in
                 self?.refreshMonitors()
+                self?.reconcileLayoutBounds()
             }
             .store(in: &cancellables)
 
@@ -648,6 +649,35 @@ class WindowManager {
     func refreshMonitors() {
         availableMonitors = NSScreen.screens.enumerated().map { index, screen in
             Monitor(screen: screen, index: index)
+        }
+    }
+
+    /// The Dock hops between displays and resizes, and every hop changes a
+    /// screen's visibleFrame — but a layout's containerBounds was captured
+    /// when it was created or its tab selected, and then never again. A
+    /// layout bounded before the Dock arrived kept placing windows into the
+    /// strip the Dock now occupies ("it's not respecting the dock as a
+    /// boundary"), and one bounded while the Dock was present kept avoiding
+    /// a strip that was free. Follow the screen parameters live: re-bound
+    /// every layout, and re-place any active one whose usable area actually
+    /// moved.
+    private func reconcileLayoutBounds() {
+        for monitor in availableMonitors {
+            guard let layout = monitorLayouts[monitor.id] else { continue }
+            let before = layout.containerBounds
+            layout.updateBounds(from: monitor.frame)
+            let after = layout.containerBounds
+            let moved = abs(before.minX - after.minX) > 2 || abs(before.minY - after.minY) > 2
+                || abs(before.width - after.width) > 2 || abs(before.height - after.height) > 2
+            if moved {
+                AccessibilityHelper.logDebug(
+                    "bounds: \(layout.screen.localizedName) usable area changed "
+                    + "\(Int(before.width))x\(Int(before.height)) -> \(Int(after.width))x\(Int(after.height))"
+                )
+                if layout.isActive {
+                    applyLayoutAndUpdateExpected(for: layout)
+                }
+            }
         }
     }
 
