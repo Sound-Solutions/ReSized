@@ -3408,6 +3408,28 @@ class WindowManager {
               )
         else { return }
 
+        // A window closer to where we just sent it than its baseline was is
+        // in flight toward our own ask, not being dragged by the user —
+        // Terminal animates its moves, and each mid-flight position read as
+        // a title-bar drag and triggered a snap-back apply. Ride along:
+        // re-baseline and let the exact-echo check or the settle pass call
+        // the landing.
+        if let intendedTarget = layout.intendedFrames[found.frameKey] {
+            let intendedAX = convertFrameToAXCoordinates(intendedTarget)
+            let expectedAX = convertFrameToAXCoordinates(expected)
+            func remaining(_ frame: CGRect) -> CGFloat {
+                abs(frame.minX - intendedAX.minX) + abs(frame.maxX - intendedAX.maxX)
+                    + abs(frame.minY - intendedAX.minY) + abs(frame.maxY - intendedAX.maxY)
+            }
+            if remaining(currentFrame) < remaining(expectedAX) - 2 {
+                AccessibilityHelper.logDebug(
+                    "event: \(found.window.ownerName) in flight toward intended, re-baselined"
+                )
+                layout.expectedFrames[found.frameKey] = convertFrameFromAXCoordinates(currentFrame)
+                return
+            }
+        }
+
         AccessibilityHelper.logDebug(
             "event: \(found.window.ownerName) off expected by "
             + "L\(Int(delta.leftEdge)) R\(Int(delta.rightEdge)) T\(Int(delta.topEdge)) B\(Int(delta.bottomEdge))"
@@ -4006,6 +4028,7 @@ class WindowManager {
         /// when the real sizes overflow it.
         func fitTrack(
             _ label: String,
+            names: [String],
             entries: [(proportion: CGFloat, achieved: CGFloat, floor: CGFloat)],
             track: CGFloat,
             assign: (Int, CGFloat) -> Void
@@ -4019,10 +4042,11 @@ class WindowManager {
                 track: track
             ) else { return }
             let achievedSum = entries.reduce(0) { $0 + $1.achieved }
+            let detail = zip(names, entries).map { name, e in
+                "\(name) asked \(Int(e.proportion / visSum * track)) got \(Int(e.achieved)) floor \(Int(e.floor))"
+            }.joined(separator: ", ")
             AccessibilityHelper.logDebug(
-                "settle: \(label) overflowed — achieved \(Int(achievedSum)) in a \(Int(track)) track"
-                + " (asked \(entries.map { Int($0.proportion / visSum * track) }),"
-                + " got \(entries.map { Int($0.achieved) }))"
+                "settle: \(label) overflowed — achieved \(Int(achievedSum)) in a \(Int(track)) track: \(detail)"
             )
             for (k, share) in shares.enumerated() { assign(k, share * visSum) }
             changed = true
@@ -4032,56 +4056,76 @@ class WindowManager {
         case .columns:
             for (columnIndex, column) in layout.columns.enumerated() {
                 var indices: [Int] = []
+                var names: [String] = []
                 var entries: [(proportion: CGFloat, achieved: CGFloat, floor: CGFloat)] = []
                 for (i, cell) in column.windows.enumerated() {
                     guard let rect = area(cell.id, cell.nestedContainer) else { continue }
                     indices.append(i)
+                    names.append(cell.window?.ownerName ?? "split")
                     entries.append((cell.heightProportion, rect.height,
                                     cellMinHeight(cell.window, cell.nestedContainer)))
                 }
-                fitTrack("column \(columnIndex) heights", entries: entries, track: bounds.height) { k, value in
+                fitTrack("column \(columnIndex) heights", names: names, entries: entries, track: bounds.height) { k, value in
                     layout.columns[columnIndex].windows[indices[k]].heightProportion = value
                 }
             }
 
             var colIndices: [Int] = []
+            var colNames: [String] = []
             var colEntries: [(proportion: CGFloat, achieved: CGFloat, floor: CGFloat)] = []
             for (i, column) in layout.columns.enumerated() {
-                let widths = column.windows.compactMap { area($0.id, $0.nestedContainer)?.width }
-                guard let widest = widths.max() else { continue }
+                var widest: (width: CGFloat, name: String)?
+                for cell in column.windows {
+                    guard let rect = area(cell.id, cell.nestedContainer) else { continue }
+                    if widest == nil || rect.width > widest!.width {
+                        widest = (rect.width, cell.window?.ownerName ?? "split")
+                    }
+                }
+                guard let widest else { continue }
                 colIndices.append(i)
-                colEntries.append((column.widthProportion, widest,
+                colNames.append("col\(i)/\(widest.name)")
+                colEntries.append((column.widthProportion, widest.width,
                                    column.windows.map { cellMinWidth($0.window, $0.nestedContainer) }.max() ?? 0))
             }
-            fitTrack("column widths", entries: colEntries, track: bounds.width) { k, value in
+            fitTrack("column widths", names: colNames, entries: colEntries, track: bounds.width) { k, value in
                 layout.columns[colIndices[k]].widthProportion = value
             }
 
         case .rows:
             for (rowIndex, row) in layout.rows.enumerated() {
                 var indices: [Int] = []
+                var names: [String] = []
                 var entries: [(proportion: CGFloat, achieved: CGFloat, floor: CGFloat)] = []
                 for (i, cell) in row.windows.enumerated() {
                     guard let rect = area(cell.id, cell.nestedContainer) else { continue }
                     indices.append(i)
+                    names.append(cell.window?.ownerName ?? "split")
                     entries.append((cell.widthProportion, rect.width,
                                     cellMinWidth(cell.window, cell.nestedContainer)))
                 }
-                fitTrack("row \(rowIndex) widths", entries: entries, track: bounds.width) { k, value in
+                fitTrack("row \(rowIndex) widths", names: names, entries: entries, track: bounds.width) { k, value in
                     layout.rows[rowIndex].windows[indices[k]].widthProportion = value
                 }
             }
 
             var rowIndices: [Int] = []
+            var rowNames: [String] = []
             var rowEntries: [(proportion: CGFloat, achieved: CGFloat, floor: CGFloat)] = []
             for (i, row) in layout.rows.enumerated() {
-                let heights = row.windows.compactMap { area($0.id, $0.nestedContainer)?.height }
-                guard let tallest = heights.max() else { continue }
+                var tallest: (height: CGFloat, name: String)?
+                for cell in row.windows {
+                    guard let rect = area(cell.id, cell.nestedContainer) else { continue }
+                    if tallest == nil || rect.height > tallest!.height {
+                        tallest = (rect.height, cell.window?.ownerName ?? "split")
+                    }
+                }
+                guard let tallest else { continue }
                 rowIndices.append(i)
-                rowEntries.append((row.heightProportion, tallest,
+                rowNames.append("row\(i)/\(tallest.name)")
+                rowEntries.append((row.heightProportion, tallest.height,
                                    row.windows.map { cellMinHeight($0.window, $0.nestedContainer) }.max() ?? 0))
             }
-            fitTrack("row heights", entries: rowEntries, track: bounds.height) { k, value in
+            fitTrack("row heights", names: rowNames, entries: rowEntries, track: bounds.height) { k, value in
                 layout.rows[rowIndices[k]].heightProportion = value
             }
         }
