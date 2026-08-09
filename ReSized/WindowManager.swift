@@ -404,6 +404,13 @@ class MonitorLayout {
     /// dozens of times a second for no visible reason.
     @ObservationIgnored var windowObserver: WindowObserver?
     @ObservationIgnored var expectedFrames: [UUID: CGRect] = [:]
+    /// What each window was ASKED to be on the last apply, alongside what the
+    /// read-back said it became. Apps apply resizes asynchronously, so a
+    /// notification arriving late at exactly the frame we requested is our own
+    /// write landing — not the user dragging an edge. Without this, that echo
+    /// was measured against a stale expected frame, read as a user resize, and
+    /// re-applied the layout: the post-release jitter.
+    @ObservationIgnored var intendedFrames: [UUID: CGRect] = [:]
     /// The draggable seams drawn over this monitor while the layout is live.
     @ObservationIgnored var seamOverlay: SeamOverlayWindow?
 
@@ -1940,10 +1947,11 @@ class WindowManager {
     /// the outer edges. There is now one implementation.
     func applyLayout() {
         guard let layout = currentLayout else { return }
-        let placed = applyLayoutForMonitor(layout)
+        let (placed, intended) = applyLayoutForMonitor(layout)
 
         if layout.isActive {
             layout.expectedFrames = placed
+            layout.intendedFrames = intended
             armEventSuppression(for: layout)
             scheduleSettleCheck(for: layout)
             // The handles are positioned from those frames, so they have to be
@@ -1984,9 +1992,12 @@ class WindowManager {
     /// discarded, which is why seams used to move for a plain window but not for
     /// a window inside a split.
     @discardableResult
-    private func applyNestedContainerLayout(container: LayoutContainer, in frame: CGRect) -> [UUID: CGRect] {
+    private func applyNestedContainerLayout(
+        container: LayoutContainer, in frame: CGRect
+    ) -> (placed: [UUID: CGRect], intended: [UUID: CGRect]) {
         var placed: [UUID: CGRect] = [:]
-        guard !container.children.isEmpty else { return placed }
+        var intended: [UUID: CGRect] = [:]
+        guard !container.children.isEmpty else { return (placed, intended) }
 
         if container.direction == .horizontal {
             // Children arranged left-to-right
@@ -1996,8 +2007,9 @@ class WindowManager {
                 let childWidth = isLast ? (frame.maxX - currentX) : (child.proportion * frame.width)
                 let childFrame = CGRect(x: currentX, y: frame.minY, width: childWidth, height: frame.height)
 
-                let actual = place(child.window, in: childFrame)
+                let (actual, requested) = place(child.window, in: childFrame)
                 placed[child.id] = actual
+                intended[child.id] = requested
                 // Butt the next pane against where this one really ended, the
                 // same way the top level does, so an app that refuses its width
                 // doesn't leave a strip of desktop at the seam.
@@ -2011,13 +2023,14 @@ class WindowManager {
                 let childHeight = isLast ? (currentTop - frame.minY) : (child.proportion * frame.height)
                 let childFrame = CGRect(x: frame.minX, y: currentTop - childHeight, width: frame.width, height: childHeight)
 
-                let actual = place(child.window, in: childFrame)
+                let (actual, requested) = place(child.window, in: childFrame)
                 placed[child.id] = actual
+                intended[child.id] = requested
                 currentTop -= max(actual.height, 0)
             }
         }
 
-        return placed
+        return (placed, intended)
     }
 
     // MARK: - Split Functions for Nested Containers
@@ -3350,8 +3363,26 @@ class WindowManager {
             return
         }
 
-        guard let found = locate(element: element, in: layout),
-              let expected = layout.expectedFrames[found.frameKey],
+        guard let found = locate(element: element, in: layout) else { return }
+
+        // A notification landing at (or near) the frame we ASKED for is our
+        // own write echoing back — apps apply resizes asynchronously, so the
+        // echo can arrive long after suppression lapsed, and the read-back
+        // the apply recorded may have been stale. Measured against that stale
+        // expected frame it read as a user resize and re-applied the layout:
+        // one visible jitter per slow app after every seam release. Take it
+        // as the new baseline instead. A real user drag landing exactly on
+        // the requested frame is the no-op case anyway.
+        if let intendedTarget = layout.intendedFrames[found.frameKey],
+           detectFrameChange(
+               from: convertFrameToAXCoordinates(intendedTarget),
+               to: currentFrame
+           ) == nil {
+            layout.expectedFrames[found.frameKey] = convertFrameFromAXCoordinates(currentFrame)
+            return
+        }
+
+        guard let expected = layout.expectedFrames[found.frameKey],
               let delta = detectFrameChange(
                   from: convertFrameToAXCoordinates(expected),
                   to: currentFrame
@@ -3527,6 +3558,7 @@ class WindowManager {
         layout.settleWorkItem?.cancel()
         layout.settleWorkItem = nil
         layout.expectedFrames.removeAll()
+        layout.intendedFrames.removeAll()
         stopMaintenanceTimerIfIdle()
         stopModifierDragMonitorIfIdle()
 
@@ -3582,6 +3614,7 @@ class WindowManager {
             layout.settleWorkItem?.cancel()
             layout.settleWorkItem = nil
             layout.expectedFrames.removeAll()
+            layout.intendedFrames.removeAll()
         }
         stopMaintenanceTimerIfIdle()
         stopModifierDragMonitorIfIdle()
@@ -3596,11 +3629,11 @@ class WindowManager {
     /// character cells, plenty of apps have minimum widths, some are fixed
     /// aspect. Callers use the real result to butt the next pane against this
     /// one instead of leaving the shortfall as a visible gap.
-    private func place(_ window: ExternalWindow, in frame: CGRect) -> CGRect {
+    private func place(_ window: ExternalWindow, in frame: CGRect) -> (actual: CGRect, requested: CGRect) {
         let target = constrainFrame(frame, for: window)
         window.setFrame(target)
 
-        guard var actualAX = ExternalWindow.getFrame(from: window.axElement) else { return target }
+        guard var actualAX = ExternalWindow.getFrame(from: window.axElement) else { return (target, target) }
 
         // Some apps (Webex — Electron generally) return success from the size
         // write and change nothing while their renderer is busy. The read
@@ -3616,7 +3649,7 @@ class WindowManager {
             }
         }
 
-        return convertFrameFromAXCoordinates(actualAX)
+        return (convertFrameFromAXCoordinates(actualAX), target)
     }
 
     /// Apply a layout to real windows, returning the frame each cell's window
@@ -3692,10 +3725,11 @@ class WindowManager {
     }
 
     @discardableResult
-    private func applyLayoutForMonitor(_ layout: MonitorLayout) -> [UUID: CGRect] {
+    private func applyLayoutForMonitor(_ layout: MonitorLayout) -> (placed: [UUID: CGRect], intended: [UUID: CGRect]) {
         let bounds = layout.containerBounds
         var placed: [UUID: CGRect] = [:]
-        guard bounds.width > 0, bounds.height > 0 else { return placed }
+        var intended: [UUID: CGRect] = [:]
+        guard bounds.width > 0, bounds.height > 0 else { return (placed, intended) }
 
         switch layout.layoutMode {
         case .columns:
@@ -3725,7 +3759,7 @@ class WindowManager {
                     )
 
                     if let window = cell.window {
-                        var actual = place(window, in: frame)
+                        var (actual, requested) = place(window, in: frame)
 
                         // Pin the outer edges only when the app cannot FILL
                         // the last slot: flush to the screen edge rather than
@@ -3745,13 +3779,17 @@ class WindowManager {
                         if adjusted.origin != actual.origin {
                             window.setFrame(adjusted)
                             actual = adjusted
+                            requested = adjusted
                         }
 
                         placed[cell.id] = actual
+                        intended[cell.id] = requested
                         currentTop -= actual.height
                         columnWidth = max(columnWidth, actual.width)
                     } else if let container = cell.nestedContainer {
-                        placed.merge(applyNestedContainerLayout(container: container, in: frame)) { _, new in new }
+                        let nested = applyNestedContainerLayout(container: container, in: frame)
+                        placed.merge(nested.placed) { _, new in new }
+                        intended.merge(nested.intended) { _, new in new }
                         currentTop -= intendedHeight
                         columnWidth = max(columnWidth, intendedWidth)
                     }
@@ -3787,7 +3825,7 @@ class WindowManager {
                     )
 
                     if let window = cell.window {
-                        var actual = place(window, in: frame)
+                        var (actual, requested) = place(window, in: frame)
 
                         // Same fill-only edge pinning as the columns pass —
                         // never pull a too-big window back over its neighbour.
@@ -3801,13 +3839,17 @@ class WindowManager {
                         if adjusted.origin != actual.origin {
                             window.setFrame(adjusted)
                             actual = adjusted
+                            requested = adjusted
                         }
 
                         placed[cell.id] = actual
+                        intended[cell.id] = requested
                         currentX += actual.width
                         rowHeight = max(rowHeight, actual.height)
                     } else if let container = cell.nestedContainer {
-                        placed.merge(applyNestedContainerLayout(container: container, in: frame)) { _, new in new }
+                        let nested = applyNestedContainerLayout(container: container, in: frame)
+                        placed.merge(nested.placed) { _, new in new }
+                        intended.merge(nested.intended) { _, new in new }
                         currentX += intendedWidth
                         rowHeight = max(rowHeight, intendedHeight)
                     }
@@ -3817,7 +3859,7 @@ class WindowManager {
             }
         }
 
-        return placed
+        return (placed, intended)
     }
 
     func applyLayoutAndUpdateExpected(for layout: MonitorLayout) {
@@ -3825,7 +3867,9 @@ class WindowManager {
         // asked for. Incoming notifications are judged against these, so an app
         // that lands slightly off (size increments) no longer reads as a user
         // resize and no longer triggers a corrective re-apply.
-        layout.expectedFrames = applyLayoutForMonitor(layout)
+        let (placed, intended) = applyLayoutForMonitor(layout)
+        layout.expectedFrames = placed
+        layout.intendedFrames = intended
         armEventSuppression(for: layout)
         refreshSeamOverlay(for: layout)
         refreshWindowObserver(for: layout)
