@@ -431,7 +431,6 @@ class MonitorLayout {
     @ObservationIgnored var settleAttempts: Int = 0
     @ObservationIgnored var settleSnapshot: [UUID: CGRect] = [:]
     @ObservationIgnored var settleWaits: Int = 0
-    @ObservationIgnored var settleLastOverflow: CGFloat = .greatestFiniteMagnitude
 
     /// Small margin to account for apps that can't fill exactly (size increments, min sizes)
     static let edgeMargin: CGFloat = 8
@@ -520,7 +519,14 @@ class WindowManager {
     /// points over the Dock margin is invisible, and correcting it would be
     /// a visible nudge after every drag.
     private static let settleOverflowTolerance: CGFloat = 10
-    private static let maxSettleAttempts = 2
+    /// Overflow earns ONE corrective re-apply per user action: the first
+    /// correction protects the refusers and reclaims the space, the floors
+    /// learned from it keep the next drag honest, and any residue is
+    /// stubborn-window wobble that another visible snap would not fix.
+    /// Actual overlap is exempt — that invariant re-applies regardless,
+    /// bounded only by the hard cap.
+    private static let maxSettleAttempts = 1
+    private static let settleHardCap = 4
     /// How many consecutive still-moving reads the settle check will sit
     /// through before giving up until the next apply. Safari has been seen
     /// taking seconds to honour a resize; 8 waits is ~3s of patience.
@@ -1843,18 +1849,18 @@ class WindowManager {
     /// minimum, or for a split whatever its panes need together. Minimized
     /// windows take no space and impose nothing.
     private func cellMinWidth(_ window: ExternalWindow?, _ container: LayoutContainer?) -> CGFloat {
-        if let window { return window.isMinimized ? 0 : window.minSize.width }
+        if let window { return window.isMinimized ? 0 : window.seamMinWidth }
         guard let container else { return 0 }
         let mins = container.children.filter { !$0.window.isMinimized }
-            .map { $0.window.minSize.width }
+            .map { $0.window.seamMinWidth }
         return container.direction == .horizontal ? mins.reduce(0, +) : (mins.max() ?? 0)
     }
 
     private func cellMinHeight(_ window: ExternalWindow?, _ container: LayoutContainer?) -> CGFloat {
-        if let window { return window.isMinimized ? 0 : window.minSize.height }
+        if let window { return window.isMinimized ? 0 : window.seamMinHeight }
         guard let container else { return 0 }
         let mins = container.children.filter { !$0.window.isMinimized }
-            .map { $0.window.minSize.height }
+            .map { $0.window.seamMinHeight }
         return container.direction == .vertical ? mins.reduce(0, +) : (mins.max() ?? 0)
     }
 
@@ -1873,8 +1879,8 @@ class WindowManager {
         let window = container.children[index].window
         guard !window.isMinimized else { return 0 }
         let points = container.direction == .horizontal
-            ? window.minSize.width
-            : window.minSize.height
+            ? window.seamMinWidth
+            : window.seamMinHeight
         return floorProportion(
             points, ofTrack: splitTrackSize(in: layout, slot: cell, direction: container.direction)
         )
@@ -4016,7 +4022,6 @@ class WindowManager {
         // re-proven from scratch.
         layout.settleSnapshot = [:]
         layout.settleWaits = 0
-        if !isSettling { layout.settleLastOverflow = .greatestFiniteMagnitude }
         scheduleSettleRun(for: layout)
     }
 
@@ -4044,7 +4049,7 @@ class WindowManager {
     /// app, reading after the settle delay does not.
     private func runSettleCheck(for layout: MonitorLayout) {
         guard layout.isActive else { return }
-        guard layout.settleAttempts < Self.maxSettleAttempts else { return }
+        guard layout.settleAttempts < Self.settleHardCap else { return }
         // A modifier drag in flight is about to rearrange things anyway.
         guard modifierDragSession == nil else { return }
 
@@ -4082,6 +4087,11 @@ class WindowManager {
         // notification — without this, a window that quietly finished its
         // resize later reads as a user edit against the stale read-back.
         for (key, rect) in real { layout.expectedFrames[key] = rect }
+
+        // Refusals proven at a settled moment become short-lived seam
+        // floors, so the next drag's band stops where the window will stop
+        // instead of promising a size it won't take and correcting after.
+        learnRefusals(in: layout, real: real)
 
         // Whether a cell has anything on screen to measure.
         func present(_ window: ExternalWindow?, _ container: LayoutContainer?) -> Bool {
@@ -4273,17 +4283,15 @@ class WindowManager {
 
         guard changed || overlapped else { return }
 
-        // A correction that didn't shrink the overflow met a window that will
-        // not cooperate — another attempt is pure jitter, not progress. Only
-        // actual overlap overrides; that invariant is absolute.
-        if !overlapped, layout.settleAttempts >= 1,
-           worstOverflow > layout.settleLastOverflow - Self.settleTolerance {
+        // The overflow budget is spent — whatever is left is a window that
+        // will not cooperate, and another visible snap will not change its
+        // mind. Only actual overlap overrides; that invariant is absolute.
+        if !overlapped, layout.settleAttempts >= Self.maxSettleAttempts {
             AccessibilityHelper.logDebug(
-                "settle: no progress (overflow \(Int(worstOverflow)) was \(Int(layout.settleLastOverflow))), leaving it"
+                "settle: leaving residual overflow of \(Int(worstOverflow)) — correction budget spent"
             )
             return
         }
-        layout.settleLastOverflow = worstOverflow
 
         AccessibilityHelper.logDebug(
             "apply: settle re-apply #\(layout.settleAttempts + 1) (changed=\(changed) overlapped=\(overlapped))"
@@ -4292,6 +4300,48 @@ class WindowManager {
         isSettling = true
         applyLayoutAndUpdateExpected(for: layout)
         isSettling = false
+    }
+
+    /// Compare where every window settled against what it was asked, and
+    /// let each one's behavioural floor learn from it. "Asked X, still Y
+    /// after everything stopped moving" is the evidence the first
+    /// learned-floor attempt never had — it sampled straight after the
+    /// write and learned phantom floors from apps that hadn't moved yet.
+    private func learnRefusals(in layout: MonitorLayout, real: [UUID: CGRect]) {
+        func judge(_ window: ExternalWindow, key: UUID) {
+            guard let rect = real[key], let intended = layout.intendedFrames[key] else { return }
+            window.reconcileWidthFloor(real: rect.width, asked: intended.width,
+                                       tolerance: Self.settleTolerance)
+            window.reconcileHeightFloor(real: rect.height, asked: intended.height,
+                                        tolerance: Self.settleTolerance)
+        }
+
+        switch layout.layoutMode {
+        case .columns:
+            for column in layout.columns {
+                for cell in column.windows {
+                    if let window = cell.window, !window.isMinimized {
+                        judge(window, key: cell.id)
+                    } else if let container = cell.nestedContainer {
+                        for child in container.children where !child.window.isMinimized {
+                            judge(child.window, key: child.id)
+                        }
+                    }
+                }
+            }
+        case .rows:
+            for row in layout.rows {
+                for cell in row.windows {
+                    if let window = cell.window, !window.isMinimized {
+                        judge(window, key: cell.id)
+                    } else if let container = cell.nestedContainer {
+                        for child in container.children where !child.window.isMinimized {
+                            judge(child.window, key: child.id)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Look again after another settle delay, up to the wait budget. The
@@ -4364,7 +4414,7 @@ class WindowManager {
                 entries.append((
                     child.proportion,
                     container.direction == .horizontal ? rect.width : rect.height,
-                    container.direction == .horizontal ? child.window.minSize.width : child.window.minSize.height
+                    container.direction == .horizontal ? child.window.seamMinWidth : child.window.seamMinHeight
                 ))
             }
             let visSum = entries.reduce(0) { $0 + $1.proportion }

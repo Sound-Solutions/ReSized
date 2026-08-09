@@ -363,12 +363,55 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
         return resolved
     }
 
-    // NOTE: an "observed minimum" learned from refused shrinks was tried here
-    // and reverted. Apps apply AX resizes asynchronously, so a read right
-    // after a write races the app and sees the OLD size — which is
-    // indistinguishable from a refusal, and the phantom floor it learns then
-    // clamps the seam that would have disproven it. Seams clamp on REPORTED
-    // minimums only.
+    // NOTE: the first "observed minimum" attempt sampled straight after the
+    // write, which races apps that apply resizes asynchronously — the OLD
+    // size read back as a refusal, and the phantom floor then clamped the
+    // seam that would have disproven it. The floors below fix each part of
+    // that: they are learned only from the settle pass, AFTER two
+    // consecutive reads agree the world has stopped moving; they clamp only
+    // what the seams OFFER, never what the layout asks, so the smaller ask
+    // that would disprove one always stays possible; a window seen smaller
+    // clears its floor on the spot; and they expire regardless.
+
+    // MARK: - Behavioural floors
+
+    private var observedMinWidth: (value: CGFloat, expires: Date)?
+    private var observedMinHeight: (value: CGFloat, expires: Date)?
+    private static let observedFloorLifetime: TimeInterval = 20
+
+    /// Update the width floor from one settled observation: asked a size,
+    /// saw what the window actually did once everything stopped moving.
+    func reconcileWidthFloor(real: CGFloat, asked: CGFloat, tolerance: CGFloat) {
+        if real > asked + tolerance {
+            observedMinWidth = (real, Date().addingTimeInterval(Self.observedFloorLifetime))
+        } else if let floor = observedMinWidth, real < floor.value - tolerance {
+            observedMinWidth = nil
+        }
+    }
+
+    func reconcileHeightFloor(real: CGFloat, asked: CGFloat, tolerance: CGFloat) {
+        if real > asked + tolerance {
+            observedMinHeight = (real, Date().addingTimeInterval(Self.observedFloorLifetime))
+        } else if let floor = observedMinHeight, real < floor.value - tolerance {
+            observedMinHeight = nil
+        }
+    }
+
+    /// What a seam should treat as this window's minimum: the reported
+    /// floor, raised by any behaviourally-proven one still in date.
+    var seamMinWidth: CGFloat {
+        if let observedMinWidth, observedMinWidth.expires > Date() {
+            return max(minSize.width, observedMinWidth.value)
+        }
+        return minSize.width
+    }
+
+    var seamMinHeight: CGFloat {
+        if let observedMinHeight, observedMinHeight.expires > Date() {
+            return max(minSize.height, observedMinHeight.value)
+        }
+        return minSize.height
+    }
 
     /// Forget the cached min/max so the next read asks the app again.
     ///
