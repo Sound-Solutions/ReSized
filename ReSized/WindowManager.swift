@@ -3092,8 +3092,14 @@ class WindowManager {
                 if notification == kAXWindowMiniaturizedNotification as String
                     || notification == kAXWindowDeminiaturizedNotification as String {
                     // Minimize hands the window's space to its neighbours;
-                    // restore takes it back. The apply pass itself skips
-                    // minimized windows, so reflowing is all there is to do.
+                    // restore takes it back. The layout filters on the CACHED
+                    // isMinimized — kept true by these events — because a live
+                    // AX read per window per apply stalled seam drags 0.1s per
+                    // busy app.
+                    if let found = self.locate(element: element, in: layout) {
+                        found.window.isMinimized =
+                            notification == kAXWindowMiniaturizedNotification as String
+                    }
                     self.applyLayoutAndUpdateExpected(for: layout)
                     return
                 }
@@ -3384,7 +3390,21 @@ class WindowManager {
         let target = constrainFrame(frame, for: window)
         window.setFrame(target)
 
-        guard let actualAX = ExternalWindow.getFrame(from: window.axElement) else { return target }
+        guard var actualAX = ExternalWindow.getFrame(from: window.axElement) else { return target }
+
+        // Some apps (Webex — Electron generally) return success from the size
+        // write and change nothing while their renderer is busy. The read
+        // above already tells us; one write-only re-ask covers the common
+        // case, and costs nothing when the size took the first time. A window
+        // still refusing after that has a genuine limit, and the layout butts
+        // its neighbours against the real frame either way.
+        let targetAX = convertFrameToAXCoordinates(target)
+        if abs(actualAX.width - targetAX.width) > 10 || abs(actualAX.height - targetAX.height) > 10 {
+            window.setFrame(target)
+            if let second = ExternalWindow.getFrame(from: window.axElement) {
+                actualAX = second
+            }
+        }
         return convertFrameFromAXCoordinates(actualAX)
     }
 
@@ -3405,9 +3425,9 @@ class WindowManager {
             var cells: [ColumnWindow] = []
             for cell in column.windows {
                 if let window = cell.window {
-                    if !window.isCurrentlyMinimized { cells.append(cell) }
+                    if !window.isMinimized { cells.append(cell) }
                 } else if var container = cell.nestedContainer {
-                    container.children = container.children.filter { !$0.window.isCurrentlyMinimized }
+                    container.children = container.children.filter { !$0.window.isMinimized }
                     guard !container.children.isEmpty else { continue }
                     container.normalizeProportions()
                     var copy = cell
@@ -3436,9 +3456,9 @@ class WindowManager {
             var cells: [RowWindow] = []
             for cell in row.windows {
                 if let window = cell.window {
-                    if !window.isCurrentlyMinimized { cells.append(cell) }
+                    if !window.isMinimized { cells.append(cell) }
                 } else if var container = cell.nestedContainer {
-                    container.children = container.children.filter { !$0.window.isCurrentlyMinimized }
+                    container.children = container.children.filter { !$0.window.isMinimized }
                     guard !container.children.isEmpty else { continue }
                     container.normalizeProportions()
                     var copy = cell

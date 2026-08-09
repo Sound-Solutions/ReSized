@@ -293,17 +293,10 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
             AccessibilityHelper.logDebug("setFrame size failed for \(ownerName): \(Self.describeAXError(sizeResult))")
         }
 
-        // Verify the size actually took. Some apps — Webex, and Electron
-        // generally — return success and change nothing while their renderer
-        // is busy, which left windows "stuck" at the old width and made seam
-        // drags on them feel dead. One re-ask covers the common case; a
-        // window still refusing after that has a genuine limit, and callers
-        // read back the real frame regardless.
-        if let applied = Self.getFrame(from: axElement)?.size,
-           abs(applied.width - sz.width) > 10 || abs(applied.height - sz.height) > 10 {
-            _ = AXUIElementSetAttributeValue(axElement, kAXSizeAttribute as CFString, sizeValue)
-            _ = AXUIElementSetAttributeValue(axElement, kAXPositionAttribute as CFString, positionValue)
-        }
+        // No read-back verification here: setFrame is the hot path — a seam
+        // drag calls it for every window on the monitor for every mouse
+        // event, and an extra read per call stalls the main thread 0.1s per
+        // busy app. place() already reads the result and re-asks on a miss.
 
         if positionSet || sizeSet {
             // setFrame runs on the main thread from the layout paths; only hop when
