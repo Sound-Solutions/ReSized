@@ -381,18 +381,24 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
 
     /// Update the width floor from one settled observation: asked a size,
     /// saw what the window actually did once everything stopped moving.
-    func reconcileWidthFloor(real: CGFloat, asked: CGFloat, tolerance: CGFloat) {
-        if real > asked + tolerance {
+    ///
+    /// Learning is deliberately harder than clearing. Webex drifts its size
+    /// ±20pt after settling, and a floor that learns from drift ratchets a
+    /// little wider on every check until the seam is clamped far from the
+    /// window's real limit — that read as "won't let me make it smaller".
+    /// Genuine refusals miss by far more than drift ever does.
+    func reconcileWidthFloor(real: CGFloat, asked: CGFloat, learnBeyond: CGFloat, clearBelow: CGFloat) {
+        if real > asked + learnBeyond {
             observedMinWidth = (real, Date().addingTimeInterval(Self.observedFloorLifetime))
-        } else if let floor = observedMinWidth, real < floor.value - tolerance {
+        } else if let floor = observedMinWidth, real < floor.value - clearBelow {
             observedMinWidth = nil
         }
     }
 
-    func reconcileHeightFloor(real: CGFloat, asked: CGFloat, tolerance: CGFloat) {
-        if real > asked + tolerance {
+    func reconcileHeightFloor(real: CGFloat, asked: CGFloat, learnBeyond: CGFloat, clearBelow: CGFloat) {
+        if real > asked + learnBeyond {
             observedMinHeight = (real, Date().addingTimeInterval(Self.observedFloorLifetime))
-        } else if let floor = observedMinHeight, real < floor.value - tolerance {
+        } else if let floor = observedMinHeight, real < floor.value - clearBelow {
             observedMinHeight = nil
         }
     }

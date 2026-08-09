@@ -528,6 +528,15 @@ class WindowManager {
     /// bounded only by the hard cap.
     private static let maxSettleAttempts = 1
     private static let settleHardCap = 4
+    /// An Electron window that was just moved drops the follow-up size write
+    /// while its renderer re-lays out, and one polite re-ask 0.35s after the
+    /// commit still lands inside that busy spell. Ask a few times, each only
+    /// after the world has re-proven stability, before believing a refusal.
+    private static let maxSettleReasks = 3
+    /// Floors learn only from misses far bigger than settle drift (±20pt on
+    /// Webex); clearing stays at the ordinary tolerance so one glimpse of the
+    /// window smaller removes a floor instantly.
+    private static let settleFloorLearnTolerance: CGFloat = 25
     /// How many consecutive still-moving reads the settle check will sit
     /// through before giving up until the next apply. Safari has been seen
     /// taking seconds to honour a resize; 8 waits is ~3s of patience.
@@ -4098,7 +4107,7 @@ class WindowManager {
         // once more from calm before treating anyone as immovable; a floor
         // learned from a busy-drop clamps a seam that a working window
         // deserved, which read as "Webex won't let me shrink it".
-        if layout.settleReasks < 1 {
+        if layout.settleReasks < Self.maxSettleReasks {
             var reasked = false
             forEachManagedWindow(in: layout) { window, key in
                 guard let rect = real[key], let intended = layout.intendedFrames[key] else { return }
@@ -4369,9 +4378,11 @@ class WindowManager {
         forEachManagedWindow(in: layout) { window, key in
             guard let rect = real[key], let intended = layout.intendedFrames[key] else { return }
             window.reconcileWidthFloor(real: rect.width, asked: intended.width,
-                                       tolerance: Self.settleTolerance)
+                                       learnBeyond: Self.settleFloorLearnTolerance,
+                                       clearBelow: Self.settleTolerance)
             window.reconcileHeightFloor(real: rect.height, asked: intended.height,
-                                        tolerance: Self.settleTolerance)
+                                        learnBeyond: Self.settleFloorLearnTolerance,
+                                        clearBelow: Self.settleTolerance)
         }
     }
 
