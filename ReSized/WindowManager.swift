@@ -915,10 +915,77 @@ class WindowManager {
         _ windows: [ExternalWindow],
         monitorFrame: CGRect
     ) -> [ExternalWindow] {
-        let tiled = windows.filter { isTiledWindow(window: $0, allWindows: windows, monitorFrame: monitorFrame) }
+        // A window nobody can see is not part of the tiling, whatever its
+        // geometry says. The edge test below judges geometry alone, and any
+        // big window brushes two monitor edges — so a buried Calendar
+        // passed as "tiled", its frame straddled every cut, and the scan
+        // collapsed to a tangle: one row of everything. Visibility comes
+        // first; the edge test then separates tiled from floating among the
+        // windows that are actually on show.
+        let visible = visiblyOnScreen(windows)
+        let candidates = visible.isEmpty ? windows : visible
+
+        let tiled = candidates.filter { isTiledWindow(window: $0, allWindows: candidates, monitorFrame: monitorFrame) }
 
         // Fall back to all windows if none are detected as tiled
-        return tiled.isEmpty ? windows : tiled
+        return tiled.isEmpty ? candidates : tiled
+    }
+
+    /// The subset of windows the window server is actually showing — on
+    /// screen and not buried under other windows.
+    ///
+    /// Sampling beats exact cover geometry: a 6×6 grid of probe points per
+    /// window against the frames in front of it, and a handful of clear
+    /// points counts as visible. Returns empty when the server has nothing
+    /// to say (blacked-out session), and the caller falls back to geometry
+    /// alone rather than scanning nothing.
+    private func visiblyOnScreen(_ windows: [ExternalWindow]) -> [ExternalWindow] {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return [] }
+
+        // Front-to-back frames of every ordinary window, and where each id
+        // sits in that order.
+        var frames: [CGRect] = []
+        var position: [CGWindowID: Int] = [:]
+        for entry in list {
+            guard let layer = entry[kCGWindowLayer as String] as? Int, layer == 0,
+                  let number = entry[kCGWindowNumber as String] as? Int,
+                  let dict = entry[kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(dictionaryRepresentation: dict as CFDictionary)
+            else { continue }
+            position[CGWindowID(number)] = frames.count
+            frames.append(bounds)
+        }
+
+        return windows.filter { window in
+            // No id to look up — nothing to judge with; keep it.
+            guard let id = window.windowID else { return true }
+            guard let index = position[id] else {
+                // The server is not showing it at all: hidden app, another
+                // Space, or mid-close.
+                AccessibilityHelper.logDebug("scan: dropping \(window.ownerName) — not on screen")
+                return false
+            }
+            let frame = frames[index]
+            guard frame.width > 12, frame.height > 12 else { return false }
+            let inFront = frames[..<index]
+            var clear = 0
+            for row in 0..<6 {
+                for col in 0..<6 {
+                    let point = CGPoint(
+                        x: frame.minX + frame.width * (CGFloat(col) + 0.5) / 6,
+                        y: frame.minY + frame.height * (CGFloat(row) + 0.5) / 6
+                    )
+                    if !inFront.contains(where: { $0.contains(point) }) {
+                        clear += 1
+                        if clear >= 3 { return true }
+                    }
+                }
+            }
+            AccessibilityHelper.logDebug("scan: dropping \(window.ownerName) — buried under other windows")
+            return false
+        }
     }
 
     /// Count max windows at any horizontal slice (for determining column count)
