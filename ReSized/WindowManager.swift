@@ -3472,7 +3472,22 @@ class WindowManager {
                 abs(frame.minX - intendedAX.minX) + abs(frame.maxX - intendedAX.maxX)
                     + abs(frame.minY - intendedAX.minY) + abs(frame.maxY - intendedAX.maxY)
             }
-            if remaining(currentFrame) < remaining(expectedAX) - 2 {
+            // An outstanding ask (one the apply's read-back never confirmed)
+            // can land in halves: Finder applies the position and the size
+            // as two separate steps, and the half-applied frame — moved
+            // down, old size — is a perfect imitation of a title-bar drag.
+            // The move snap-back then re-applied the monitor and trampled
+            // the pending half, which read as the window refusing and the
+            // seam jumping back. Anything consistent with our own ask in
+            // progress just re-baselines; the settle pass calls the landing.
+            let outstanding = remaining(expectedAX) > 2
+            func close(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) <= 8 }
+            let positionLanded = close(currentFrame.minX, intendedAX.minX)
+                && close(currentFrame.minY, intendedAX.minY)
+            let sizeLanded = close(currentFrame.width, intendedAX.width)
+                && close(currentFrame.height, intendedAX.height)
+            if remaining(currentFrame) < remaining(expectedAX) - 2
+                || (outstanding && (positionLanded || sizeLanded)) {
                 AccessibilityHelper.logDebug(
                     "event: \(found.window.ownerName) in flight toward intended, re-baselined"
                 )
@@ -3503,9 +3518,14 @@ class WindowManager {
                found.window.windowID == modifierDragSession?.windowID {
                 return
             }
+            // Put THIS window back, and only this window. Re-applying the
+            // whole monitor here interrupted every other window's pending
+            // resize with a fresh volley of writes — one misread event
+            // could trample a whole gesture's worth of half-applied asks.
             AccessibilityHelper.logDebug("apply: move snap-back for \(found.window.ownerName)")
             reflowWorkItem?.cancel()
-            applyLayoutAndUpdateExpected(for: layout)
+            found.window.setFrame(expected)
+            armEventSuppression(for: layout)
             return
         }
 
