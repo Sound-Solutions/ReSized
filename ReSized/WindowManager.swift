@@ -431,6 +431,7 @@ class MonitorLayout {
     @ObservationIgnored var settleAttempts: Int = 0
     @ObservationIgnored var settleSnapshot: [UUID: CGRect] = [:]
     @ObservationIgnored var settleWaits: Int = 0
+    @ObservationIgnored var settleLastOverflow: CGFloat = .greatestFiniteMagnitude
 
     /// Small margin to account for apps that can't fill exactly (size increments, min sizes)
     static let edgeMargin: CGFloat = 8
@@ -3948,6 +3949,7 @@ class WindowManager {
         // re-proven from scratch.
         layout.settleSnapshot = [:]
         layout.settleWaits = 0
+        if !isSettling { layout.settleLastOverflow = .greatestFiniteMagnitude }
         scheduleSettleRun(for: layout)
     }
 
@@ -4014,15 +4016,55 @@ class WindowManager {
         // resize later reads as a user edit against the stale read-back.
         for (key, rect) in real { layout.expectedFrames[key] = rect }
 
-        // The area a cell's real windows cover, or nil when everything in it
-        // is minimized.
-        func area(_ id: UUID, _ container: LayoutContainer?) -> CGRect? {
-            if let direct = real[id] { return direct }
+        // Whether a cell has anything on screen to measure.
+        func present(_ window: ExternalWindow?, _ container: LayoutContainer?) -> Bool {
+            if let window { return !window.isMinimized }
+            return container?.children.contains { !$0.window.isMinimized } ?? false
+        }
+
+        // What a cell will insist on along an axis once its panes are refit:
+        // stuck panes keep their real size, compliant panes keep their ask.
+        // Measuring a split by the UNION of its panes over-protected — the
+        // union counts a compliant pane at its current size, which the pane
+        // fit is about to shrink, so every settle round found a different
+        // member over the line and ratcheted the whole track (the
+        // split-panel chase).
+        func cellDemand(
+            _ id: UUID, _ window: ExternalWindow?, _ container: LayoutContainer?,
+            alongHeight: Bool, cellExtent: CGFloat
+        ) -> CGFloat? {
+            if window != nil {
+                guard let rect = real[id] else { return nil }
+                return alongHeight ? rect.height : rect.width
+            }
             guard let container else { return nil }
-            return container.children.compactMap { real[$0.id] }.reduce(nil, union)
+            let live = container.children.filter { !$0.window.isMinimized }
+            guard !live.isEmpty else { return nil }
+            let visSum = live.reduce(0) { $0 + $1.proportion }
+
+            // Panes laid along the measured axis sum; panes across it overlay.
+            if (container.direction == .horizontal) != alongHeight {
+                var total: CGFloat = 0
+                for child in live {
+                    guard let rect = real[child.id] else { return nil }
+                    let size = alongHeight ? rect.height : rect.width
+                    let asked = visSum > 0 ? child.proportion / visSum * cellExtent : cellExtent
+                    total += size > asked + Self.settleTolerance ? size : asked
+                }
+                return total
+            } else {
+                var most: CGFloat = 0
+                for child in live {
+                    guard let rect = real[child.id] else { return nil }
+                    let size = alongHeight ? rect.height : rect.width
+                    most = max(most, size > cellExtent + Self.settleTolerance ? size : cellExtent)
+                }
+                return most
+            }
         }
 
         var changed = false
+        var worstOverflow: CGFloat = 0
 
         /// Fit one track, writing adjusted proportions back through `assign`
         /// when the real sizes overflow it.
@@ -4050,19 +4092,26 @@ class WindowManager {
             )
             for (k, share) in shares.enumerated() { assign(k, share * visSum) }
             changed = true
+            worstOverflow = max(worstOverflow, achievedSum - track)
         }
 
         switch layout.layoutMode {
         case .columns:
             for (columnIndex, column) in layout.columns.enumerated() {
+                let liveCells = column.windows.filter { present($0.window, $0.nestedContainer) }
+                let cellVisSum = liveCells.reduce(0) { $0 + $1.heightProportion }
+                guard liveCells.count > 1, cellVisSum > 0 else { continue }
+
                 var indices: [Int] = []
                 var names: [String] = []
                 var entries: [(proportion: CGFloat, achieved: CGFloat, floor: CGFloat)] = []
-                for (i, cell) in column.windows.enumerated() {
-                    guard let rect = area(cell.id, cell.nestedContainer) else { continue }
+                for (i, cell) in column.windows.enumerated() where present(cell.window, cell.nestedContainer) {
+                    let extent = cell.heightProportion / cellVisSum * bounds.height
+                    guard let demand = cellDemand(cell.id, cell.window, cell.nestedContainer,
+                                                  alongHeight: true, cellExtent: extent) else { continue }
                     indices.append(i)
                     names.append(cell.window?.ownerName ?? "split")
-                    entries.append((cell.heightProportion, rect.height,
+                    entries.append((cell.heightProportion, demand,
                                     cellMinHeight(cell.window, cell.nestedContainer)))
                 }
                 fitTrack("column \(columnIndex) heights", names: names, entries: entries, track: bounds.height) { k, value in
@@ -4073,34 +4122,46 @@ class WindowManager {
             var colIndices: [Int] = []
             var colNames: [String] = []
             var colEntries: [(proportion: CGFloat, achieved: CGFloat, floor: CGFloat)] = []
-            for (i, column) in layout.columns.enumerated() {
-                var widest: (width: CGFloat, name: String)?
-                for cell in column.windows {
-                    guard let rect = area(cell.id, cell.nestedContainer) else { continue }
-                    if widest == nil || rect.width > widest!.width {
-                        widest = (rect.width, cell.window?.ownerName ?? "split")
+            let liveColumns = layout.columns.filter { $0.windows.contains { present($0.window, $0.nestedContainer) } }
+            let colVisSum = liveColumns.reduce(0) { $0 + $1.widthProportion }
+            if liveColumns.count > 1, colVisSum > 0 {
+                for (i, column) in layout.columns.enumerated() {
+                    let columnExtent = column.widthProportion / colVisSum * bounds.width
+                    var widest: (width: CGFloat, name: String)?
+                    for cell in column.windows where present(cell.window, cell.nestedContainer) {
+                        guard let demand = cellDemand(cell.id, cell.window, cell.nestedContainer,
+                                                      alongHeight: false, cellExtent: columnExtent) else { continue }
+                        if widest == nil || demand > widest!.width {
+                            widest = (demand, cell.window?.ownerName ?? "split")
+                        }
                     }
+                    guard let widest else { continue }
+                    colIndices.append(i)
+                    colNames.append("col\(i)/\(widest.name)")
+                    colEntries.append((column.widthProportion, widest.width,
+                                       column.windows.map { cellMinWidth($0.window, $0.nestedContainer) }.max() ?? 0))
                 }
-                guard let widest else { continue }
-                colIndices.append(i)
-                colNames.append("col\(i)/\(widest.name)")
-                colEntries.append((column.widthProportion, widest.width,
-                                   column.windows.map { cellMinWidth($0.window, $0.nestedContainer) }.max() ?? 0))
-            }
-            fitTrack("column widths", names: colNames, entries: colEntries, track: bounds.width) { k, value in
-                layout.columns[colIndices[k]].widthProportion = value
+                fitTrack("column widths", names: colNames, entries: colEntries, track: bounds.width) { k, value in
+                    layout.columns[colIndices[k]].widthProportion = value
+                }
             }
 
         case .rows:
             for (rowIndex, row) in layout.rows.enumerated() {
+                let liveCells = row.windows.filter { present($0.window, $0.nestedContainer) }
+                let cellVisSum = liveCells.reduce(0) { $0 + $1.widthProportion }
+                guard liveCells.count > 1, cellVisSum > 0 else { continue }
+
                 var indices: [Int] = []
                 var names: [String] = []
                 var entries: [(proportion: CGFloat, achieved: CGFloat, floor: CGFloat)] = []
-                for (i, cell) in row.windows.enumerated() {
-                    guard let rect = area(cell.id, cell.nestedContainer) else { continue }
+                for (i, cell) in row.windows.enumerated() where present(cell.window, cell.nestedContainer) {
+                    let extent = cell.widthProportion / cellVisSum * bounds.width
+                    guard let demand = cellDemand(cell.id, cell.window, cell.nestedContainer,
+                                                  alongHeight: false, cellExtent: extent) else { continue }
                     indices.append(i)
                     names.append(cell.window?.ownerName ?? "split")
-                    entries.append((cell.widthProportion, rect.width,
+                    entries.append((cell.widthProportion, demand,
                                     cellMinWidth(cell.window, cell.nestedContainer)))
                 }
                 fitTrack("row \(rowIndex) widths", names: names, entries: entries, track: bounds.width) { k, value in
@@ -4111,26 +4172,32 @@ class WindowManager {
             var rowIndices: [Int] = []
             var rowNames: [String] = []
             var rowEntries: [(proportion: CGFloat, achieved: CGFloat, floor: CGFloat)] = []
-            for (i, row) in layout.rows.enumerated() {
-                var tallest: (height: CGFloat, name: String)?
-                for cell in row.windows {
-                    guard let rect = area(cell.id, cell.nestedContainer) else { continue }
-                    if tallest == nil || rect.height > tallest!.height {
-                        tallest = (rect.height, cell.window?.ownerName ?? "split")
+            let liveRows = layout.rows.filter { $0.windows.contains { present($0.window, $0.nestedContainer) } }
+            let rowVisSum = liveRows.reduce(0) { $0 + $1.heightProportion }
+            if liveRows.count > 1, rowVisSum > 0 {
+                for (i, row) in layout.rows.enumerated() {
+                    let rowExtent = row.heightProportion / rowVisSum * bounds.height
+                    var tallest: (height: CGFloat, name: String)?
+                    for cell in row.windows where present(cell.window, cell.nestedContainer) {
+                        guard let demand = cellDemand(cell.id, cell.window, cell.nestedContainer,
+                                                      alongHeight: true, cellExtent: rowExtent) else { continue }
+                        if tallest == nil || demand > tallest!.height {
+                            tallest = (demand, cell.window?.ownerName ?? "split")
+                        }
                     }
+                    guard let tallest else { continue }
+                    rowIndices.append(i)
+                    rowNames.append("row\(i)/\(tallest.name)")
+                    rowEntries.append((row.heightProportion, tallest.height,
+                                       row.windows.map { cellMinHeight($0.window, $0.nestedContainer) }.max() ?? 0))
                 }
-                guard let tallest else { continue }
-                rowIndices.append(i)
-                rowNames.append("row\(i)/\(tallest.name)")
-                rowEntries.append((row.heightProportion, tallest.height,
-                                   row.windows.map { cellMinHeight($0.window, $0.nestedContainer) }.max() ?? 0))
-            }
-            fitTrack("row heights", names: rowNames, entries: rowEntries, track: bounds.height) { k, value in
-                layout.rows[rowIndices[k]].heightProportion = value
+                fitTrack("row heights", names: rowNames, entries: rowEntries, track: bounds.height) { k, value in
+                    layout.rows[rowIndices[k]].heightProportion = value
+                }
             }
         }
 
-        settleSplitTracks(in: layout, real: real, changed: &changed)
+        settleSplitTracks(in: layout, real: real, changed: &changed, worstOverflow: &worstOverflow)
 
         // Even when no track overflowed, two windows sitting on each other is
         // reason enough to re-apply: placement against a stale read-back can
@@ -4138,6 +4205,19 @@ class WindowManager {
         let overlapped = anyOverlap(in: Array(real.values))
 
         guard changed || overlapped else { return }
+
+        // A correction that didn't shrink the overflow met a window that will
+        // not cooperate — another attempt is pure jitter, not progress. Only
+        // actual overlap overrides; that invariant is absolute.
+        if !overlapped, layout.settleAttempts >= 1,
+           worstOverflow > layout.settleLastOverflow - Self.settleTolerance {
+            AccessibilityHelper.logDebug(
+                "settle: no progress (overflow \(Int(worstOverflow)) was \(Int(layout.settleLastOverflow))), leaving it"
+            )
+            return
+        }
+        layout.settleLastOverflow = worstOverflow
+
         AccessibilityHelper.logDebug(
             "apply: settle re-apply #\(layout.settleAttempts + 1) (changed=\(changed) overlapped=\(overlapped))"
         )
@@ -4201,15 +4281,19 @@ class WindowManager {
 
     /// Panes within a split share their cell the same way the cells share
     /// the monitor — fit each split's track too.
-    private func settleSplitTracks(in layout: MonitorLayout, real: [UUID: CGRect], changed: inout Bool) {
-        func settle(_ container: inout LayoutContainer, slot: WindowSlot) -> Bool {
+    private func settleSplitTracks(
+        in layout: MonitorLayout, real: [UUID: CGRect], changed: inout Bool, worstOverflow: inout CGFloat
+    ) {
+        func settle(_ container: inout LayoutContainer, slot: WindowSlot, label: String) -> Bool {
             let track = splitTrackSize(in: layout, slot: slot, direction: container.direction)
             guard track > 0 else { return false }
             var indices: [Int] = []
+            var names: [String] = []
             var entries: [(proportion: CGFloat, achieved: CGFloat, floor: CGFloat)] = []
             for (i, child) in container.children.enumerated() where !child.window.isMinimized {
                 guard let rect = real[child.id] else { continue }
                 indices.append(i)
+                names.append(child.window.ownerName)
                 entries.append((
                     child.proportion,
                     container.direction == .horizontal ? rect.width : rect.height,
@@ -4224,6 +4308,14 @@ class WindowManager {
                 floors: entries.map(\.floor),
                 track: track
             ) else { return false }
+            let achievedSum = entries.reduce(0) { $0 + $1.achieved }
+            let detail = zip(names, entries).map { name, e in
+                "\(name) asked \(Int(e.proportion / visSum * track)) got \(Int(e.achieved)) floor \(Int(e.floor))"
+            }.joined(separator: ", ")
+            AccessibilityHelper.logDebug(
+                "settle: \(label) overflowed — achieved \(Int(achievedSum)) in a \(Int(track)) track: \(detail)"
+            )
+            worstOverflow = max(worstOverflow, achievedSum - track)
             for (k, share) in shares.enumerated() {
                 container.children[indices[k]].proportion = share * visSum
             }
@@ -4237,7 +4329,7 @@ class WindowManager {
                     guard var container = cell.nestedContainer else { continue }
                     let slot = WindowSlot(columnIndex: columnIndex, rowIndex: nil,
                                           windowIndex: i, nestedIndex: nil)
-                    if settle(&container, slot: slot) {
+                    if settle(&container, slot: slot, label: "split c\(columnIndex)w\(i)") {
                         layout.columns[columnIndex].windows[i].nestedContainer = container
                         changed = true
                     }
@@ -4249,7 +4341,7 @@ class WindowManager {
                     guard var container = cell.nestedContainer else { continue }
                     let slot = WindowSlot(columnIndex: nil, rowIndex: rowIndex,
                                           windowIndex: i, nestedIndex: nil)
-                    if settle(&container, slot: slot) {
+                    if settle(&container, slot: slot, label: "split r\(rowIndex)w\(i)") {
                         layout.rows[rowIndex].windows[i].nestedContainer = container
                         changed = true
                     }
