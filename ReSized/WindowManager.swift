@@ -2677,6 +2677,9 @@ class WindowManager {
     /// and the resize functions' default target follow the *selected*
     /// monitor, which is not necessarily the one that was dragged.
     func dragDesktopSeam(_ seam: DesktopSeam, in layout: MonitorLayout, proportionalTranslation: CGFloat) {
+        AccessibilityHelper.logDebug(
+            "apply: seam commit \(seam.divider) shift=\(String(format: "%.3f", proportionalTranslation))"
+        )
         switch seam.divider {
         case .primary(let index):
             switch layout.layoutMode {
@@ -3378,6 +3381,9 @@ class WindowManager {
                from: convertFrameToAXCoordinates(intendedTarget),
                to: currentFrame
            ) == nil {
+            AccessibilityHelper.logDebug(
+                "event: echo from \(found.window.ownerName), re-baselined"
+            )
             layout.expectedFrames[found.frameKey] = convertFrameFromAXCoordinates(currentFrame)
             return
         }
@@ -3388,6 +3394,12 @@ class WindowManager {
                   to: currentFrame
               )
         else { return }
+
+        AccessibilityHelper.logDebug(
+            "event: \(found.window.ownerName) off expected by "
+            + "L\(Int(delta.leftEdge)) R\(Int(delta.rightEdge)) T\(Int(delta.topEdge)) B\(Int(delta.bottomEdge))"
+            + " (intended miss: \(layout.intendedFrames[found.frameKey].map { i in "\(convertFrameToAXCoordinates(i))" } ?? "none") vs \(currentFrame))"
+        )
 
         // A window dragged by its title bar keeps its size and changes only its
         // position. There is no way to refuse that — nothing can stop another
@@ -3405,6 +3417,7 @@ class WindowManager {
                found.window.windowID == modifierDragSession?.windowID {
                 return
             }
+            AccessibilityHelper.logDebug("apply: move snap-back for \(found.window.ownerName)")
             reflowWorkItem?.cancel()
             applyLayoutAndUpdateExpected(for: layout)
             return
@@ -3500,6 +3513,7 @@ class WindowManager {
 
         let item = DispatchWorkItem { [weak self, weak layout] in
             guard let self, let layout, layout.isActive else { return }
+            AccessibilityHelper.logDebug("apply: debounced reflow after resize event")
             self.applyLayoutAndUpdateExpected(for: layout)
         }
         reflowWorkItem = item
@@ -3975,6 +3989,7 @@ class WindowManager {
         /// Fit one track, writing adjusted proportions back through `assign`
         /// when the real sizes overflow it.
         func fitTrack(
+            _ label: String,
             entries: [(proportion: CGFloat, achieved: CGFloat, floor: CGFloat)],
             track: CGFloat,
             assign: (Int, CGFloat) -> Void
@@ -3987,6 +4002,12 @@ class WindowManager {
                 floors: entries.map(\.floor),
                 track: track
             ) else { return }
+            let achievedSum = entries.reduce(0) { $0 + $1.achieved }
+            AccessibilityHelper.logDebug(
+                "settle: \(label) overflowed — achieved \(Int(achievedSum)) in a \(Int(track)) track"
+                + " (asked \(entries.map { Int($0.proportion / visSum * track) }),"
+                + " got \(entries.map { Int($0.achieved) }))"
+            )
             for (k, share) in shares.enumerated() { assign(k, share * visSum) }
             changed = true
         }
@@ -4002,7 +4023,7 @@ class WindowManager {
                     entries.append((cell.heightProportion, rect.height,
                                     cellMinHeight(cell.window, cell.nestedContainer)))
                 }
-                fitTrack(entries: entries, track: bounds.height) { k, value in
+                fitTrack("column \(columnIndex) heights", entries: entries, track: bounds.height) { k, value in
                     layout.columns[columnIndex].windows[indices[k]].heightProportion = value
                 }
             }
@@ -4016,7 +4037,7 @@ class WindowManager {
                 colEntries.append((column.widthProportion, widest,
                                    column.windows.map { cellMinWidth($0.window, $0.nestedContainer) }.max() ?? 0))
             }
-            fitTrack(entries: colEntries, track: bounds.width) { k, value in
+            fitTrack("column widths", entries: colEntries, track: bounds.width) { k, value in
                 layout.columns[colIndices[k]].widthProportion = value
             }
 
@@ -4030,7 +4051,7 @@ class WindowManager {
                     entries.append((cell.widthProportion, rect.width,
                                     cellMinWidth(cell.window, cell.nestedContainer)))
                 }
-                fitTrack(entries: entries, track: bounds.width) { k, value in
+                fitTrack("row \(rowIndex) widths", entries: entries, track: bounds.width) { k, value in
                     layout.rows[rowIndex].windows[indices[k]].widthProportion = value
                 }
             }
@@ -4044,7 +4065,7 @@ class WindowManager {
                 rowEntries.append((row.heightProportion, tallest,
                                    row.windows.map { cellMinHeight($0.window, $0.nestedContainer) }.max() ?? 0))
             }
-            fitTrack(entries: rowEntries, track: bounds.height) { k, value in
+            fitTrack("row heights", entries: rowEntries, track: bounds.height) { k, value in
                 layout.rows[rowIndices[k]].heightProportion = value
             }
         }
@@ -4057,6 +4078,9 @@ class WindowManager {
         let overlapped = anyOverlap(in: Array(real.values))
 
         guard changed || overlapped else { return }
+        AccessibilityHelper.logDebug(
+            "apply: settle re-apply #\(layout.settleAttempts + 1) (changed=\(changed) overlapped=\(overlapped))"
+        )
         layout.settleAttempts += 1
         isSettling = true
         applyLayoutAndUpdateExpected(for: layout)
