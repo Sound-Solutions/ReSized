@@ -1879,23 +1879,6 @@ class WindowManager {
         track > 0 ? points / track : Self.minPaneProportion
     }
 
-    /// One pane's floor as a share of its split's on-screen track.
-    private func paneFloor(
-        _ container: LayoutContainer, _ index: Int, cell: WindowSlot, in layout: MonitorLayout
-    ) -> CGFloat {
-        guard container.children.indices.contains(index) else {
-            return Self.minPaneProportion
-        }
-        let window = container.children[index].window
-        guard !window.isMinimized else { return 0 }
-        let points = container.direction == .horizontal
-            ? window.seamMinWidth
-            : window.seamMinHeight
-        return floorProportion(
-            points, ofTrack: splitTrackSize(in: layout, slot: cell, direction: container.direction)
-        )
-    }
-
     /// Resize a column divider (between columnIndex and columnIndex+1).
     ///
     /// Takes the proportions captured when the drag began plus the total
@@ -1914,19 +1897,14 @@ class WindowManager {
         guard let layout = targetLayout ?? currentLayout else { return }
         guard dividerIndex >= 0, dividerIndex + 1 < layout.columns.count else { return }
 
-        let track = layout.containerBounds.width
-        func columnFloor(_ column: Column) -> CGFloat {
-            floorProportion(
-                column.windows.map { cellMinWidth($0.window, $0.nestedContainer) }.max() ?? 0,
-                ofTrack: track
-            )
-        }
+        // Generic clamp only. Clamping dividers against the windows' minimums
+        // was tried and read as the seam fighting the hand whenever a cached
+        // minimum overstated (and they do); the settle pass walks the seam
+        // back from reality instead, after the gesture.
         guard let (left, right) = Self.resolveSplit(
             first: initialFirst,
             second: initialSecond,
-            delta: proportionalTranslation,
-            minFirst: columnFloor(layout.columns[dividerIndex]),
-            minSecond: columnFloor(layout.columns[dividerIndex + 1])
+            delta: proportionalTranslation
         ) else { return }
 
         layout.columns[dividerIndex].widthProportion = left
@@ -1950,15 +1928,10 @@ class WindowManager {
         guard columnIndex >= 0, columnIndex < layout.columns.count else { return }
         guard dividerIndex >= 0, dividerIndex + 1 < layout.columns[columnIndex].windows.count else { return }
 
-        let track = layout.containerBounds.height
-        let cellA = layout.columns[columnIndex].windows[dividerIndex]
-        let cellB = layout.columns[columnIndex].windows[dividerIndex + 1]
         guard let (top, bottom) = Self.resolveSplit(
             first: initialFirst,
             second: initialSecond,
-            delta: proportionalTranslation,
-            minFirst: floorProportion(cellMinHeight(cellA.window, cellA.nestedContainer), ofTrack: track),
-            minSecond: floorProportion(cellMinHeight(cellB.window, cellB.nestedContainer), ofTrack: track)
+            delta: proportionalTranslation
         ) else { return }
 
         layout.columns[columnIndex].windows[dividerIndex].heightProportion = top
@@ -1981,19 +1954,10 @@ class WindowManager {
         guard let layout = targetLayout ?? currentLayout else { return }
         guard dividerIndex >= 0, dividerIndex + 1 < layout.rows.count else { return }
 
-        let track = layout.containerBounds.height
-        func rowFloor(_ row: Row) -> CGFloat {
-            floorProportion(
-                row.windows.map { cellMinHeight($0.window, $0.nestedContainer) }.max() ?? 0,
-                ofTrack: track
-            )
-        }
         guard let (top, bottom) = Self.resolveSplit(
             first: initialFirst,
             second: initialSecond,
-            delta: proportionalTranslation,
-            minFirst: rowFloor(layout.rows[dividerIndex]),
-            minSecond: rowFloor(layout.rows[dividerIndex + 1])
+            delta: proportionalTranslation
         ) else { return }
 
         layout.rows[dividerIndex].heightProportion = top
@@ -2017,15 +1981,10 @@ class WindowManager {
         guard rowIndex >= 0, rowIndex < layout.rows.count else { return }
         guard dividerIndex >= 0, dividerIndex + 1 < layout.rows[rowIndex].windows.count else { return }
 
-        let track = layout.containerBounds.width
-        let cellA = layout.rows[rowIndex].windows[dividerIndex]
-        let cellB = layout.rows[rowIndex].windows[dividerIndex + 1]
         guard let (left, right) = Self.resolveSplit(
             first: initialFirst,
             second: initialSecond,
-            delta: proportionalTranslation,
-            minFirst: floorProportion(cellMinWidth(cellA.window, cellA.nestedContainer), ofTrack: track),
-            minSecond: floorProportion(cellMinWidth(cellB.window, cellB.nestedContainer), ofTrack: track)
+            delta: proportionalTranslation
         ) else { return }
 
         layout.rows[rowIndex].windows[dividerIndex].widthProportion = left
@@ -2504,13 +2463,13 @@ class WindowManager {
             // Scoped to the layout that owns the overlay, not the one the
             // config window happens to have selected — a seam grabbed on one
             // monitor must never resize another.
-            overlay.seamView?.onCommit = { [weak self, weak layout] seam, translation in
+            overlay.seamView?.onDrag = { [weak self, weak layout] seam, translation in
                 guard let self, let layout else { return }
                 self.dragDesktopSeam(seam, in: layout, proportionalTranslation: translation)
             }
-            overlay.seamView?.clampShift = { [weak self, weak layout] seam, requested in
-                guard let self, let layout else { return requested }
-                return self.achievableSeamShift(seam, in: layout, requested: requested)
+            overlay.seamView?.clampShift = { seam, requested in
+                Self.achievableShift(first: seam.initialFirst, second: seam.initialSecond,
+                                     requested: requested)
             }
             overlay.seamView?.isPointExposed = { [weak self, weak layout] point in
                 guard let self, let layout else { return true }
@@ -2769,14 +2728,13 @@ class WindowManager {
     }
 
     /// Apply a divider drag that started on the desktop, in the same terms the
-    /// preview's handles use. Committed once, on mouse-up — never per event.
-    /// Scoped to the layout whose overlay the seam belongs to; `layoutMode`
-    /// and the resize functions' default target follow the *selected*
-    /// monitor, which is not necessarily the one that was dragged.
+    /// preview's handles use. Called live, per event — the desktop's own
+    /// windows are the preview out here, and Kennith rejected the deferred
+    /// version against the shipped build. Scoped to the layout whose overlay
+    /// the seam belongs to; `layoutMode` and the resize functions' default
+    /// target follow the *selected* monitor, which is not necessarily the
+    /// one that was dragged.
     func dragDesktopSeam(_ seam: DesktopSeam, in layout: MonitorLayout, proportionalTranslation: CGFloat) {
-        AccessibilityHelper.logDebug(
-            "apply: seam commit \(seam.divider) shift=\(String(format: "%.3f", proportionalTranslation))"
-        )
         switch seam.divider {
         case .primary(let index):
             switch layout.layoutMode {
@@ -2823,70 +2781,6 @@ class WindowManager {
         }
     }
 
-    /// How far a desktop seam drag can actually travel, against the same
-    /// floors the commit will clamp with — the overlay positions its band
-    /// from this so the line never sits somewhere the layout won't follow.
-    func achievableSeamShift(_ seam: DesktopSeam, in layout: MonitorLayout, requested: CGFloat) -> CGFloat {
-        let bounds = layout.containerBounds
-        let floors: (first: CGFloat, second: CGFloat)
-
-        switch seam.divider {
-        case .primary(let index):
-            switch layout.layoutMode {
-            case .columns:
-                guard index >= 0, index + 1 < layout.columns.count else { return 0 }
-                func columnFloor(_ column: Column) -> CGFloat {
-                    floorProportion(
-                        column.windows.map { cellMinWidth($0.window, $0.nestedContainer) }.max() ?? 0,
-                        ofTrack: bounds.width
-                    )
-                }
-                floors = (columnFloor(layout.columns[index]), columnFloor(layout.columns[index + 1]))
-            case .rows:
-                guard index >= 0, index + 1 < layout.rows.count else { return 0 }
-                func rowFloor(_ row: Row) -> CGFloat {
-                    floorProportion(
-                        row.windows.map { cellMinHeight($0.window, $0.nestedContainer) }.max() ?? 0,
-                        ofTrack: bounds.height
-                    )
-                }
-                floors = (rowFloor(layout.rows[index]), rowFloor(layout.rows[index + 1]))
-            }
-
-        case .cellInColumn(let columnIndex, let index):
-            guard layout.columns.indices.contains(columnIndex),
-                  index >= 0, index + 1 < layout.columns[columnIndex].windows.count else { return 0 }
-            let a = layout.columns[columnIndex].windows[index]
-            let b = layout.columns[columnIndex].windows[index + 1]
-            floors = (
-                floorProportion(cellMinHeight(a.window, a.nestedContainer), ofTrack: bounds.height),
-                floorProportion(cellMinHeight(b.window, b.nestedContainer), ofTrack: bounds.height)
-            )
-
-        case .cellInRow(let rowIndex, let index):
-            guard layout.rows.indices.contains(rowIndex),
-                  index >= 0, index + 1 < layout.rows[rowIndex].windows.count else { return 0 }
-            let a = layout.rows[rowIndex].windows[index]
-            let b = layout.rows[rowIndex].windows[index + 1]
-            floors = (
-                floorProportion(cellMinWidth(a.window, a.nestedContainer), ofTrack: bounds.width),
-                floorProportion(cellMinWidth(b.window, b.nestedContainer), ofTrack: bounds.width)
-            )
-
-        case .pane(let cell, let index):
-            guard let container = nestedContainer(in: layout, at: cell),
-                  index >= 0, index + 1 < container.children.count else { return 0 }
-            floors = (
-                paneFloor(container, index, cell: cell, in: layout),
-                paneFloor(container, index + 1, cell: cell, in: layout)
-            )
-        }
-
-        return Self.achievableShift(
-            first: seam.initialFirst, second: seam.initialSecond, requested: requested,
-            minFirst: floors.first, minSecond: floors.second
-        )
-    }
 
     // MARK: - Seam Placement
 
@@ -3283,14 +3177,10 @@ class WindowManager {
         guard var container = layout.columns[columnIndex].windows[windowIndex].nestedContainer else { return }
         guard dividerIndex >= 0, dividerIndex + 1 < container.children.count else { return }
 
-        let slot = WindowSlot(columnIndex: columnIndex, rowIndex: nil,
-                              windowIndex: windowIndex, nestedIndex: nil)
         guard let (prop1, prop2) = Self.resolveSplit(
             first: initialProp1,
             second: initialProp2,
-            delta: proportionalTranslation,
-            minFirst: paneFloor(container, dividerIndex, cell: slot, in: layout),
-            minSecond: paneFloor(container, dividerIndex + 1, cell: slot, in: layout)
+            delta: proportionalTranslation
         ) else { return }
 
         container.children[dividerIndex].proportion = prop1
@@ -3326,14 +3216,10 @@ class WindowManager {
         guard var container = layout.rows[rowIndex].windows[windowIndex].nestedContainer else { return }
         guard dividerIndex >= 0, dividerIndex + 1 < container.children.count else { return }
 
-        let slot = WindowSlot(columnIndex: nil, rowIndex: rowIndex,
-                              windowIndex: windowIndex, nestedIndex: nil)
         guard let (prop1, prop2) = Self.resolveSplit(
             first: initialProp1,
             second: initialProp2,
-            delta: proportionalTranslation,
-            minFirst: paneFloor(container, dividerIndex, cell: slot, in: layout),
-            minSecond: paneFloor(container, dividerIndex + 1, cell: slot, in: layout)
+            delta: proportionalTranslation
         ) else { return }
 
         container.children[dividerIndex].proportion = prop1

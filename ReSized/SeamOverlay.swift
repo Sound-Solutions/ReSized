@@ -73,16 +73,19 @@ final class SeamOverlayView: NSView {
     /// swallow clicks straight through whatever is covering the tiled windows.
     var isPointExposed: ((CGPoint) -> Bool)?
 
-    /// Called once, on mouse-up, with the final shift as a fraction of the
-    /// seam's track. The windows do not move until then — the same deferred
-    /// commit as the config window's dividers, and for the same reason:
-    /// applying on every event races apps' asynchronous resizes and buries
-    /// the main thread in AX round trips. This has regressed to live-follow
-    /// before; it must not again.
-    var onCommit: ((DesktopSeam, CGFloat) -> Void)?
+    /// Called continuously while a seam is dragged, with the clamped drag so
+    /// far as a fraction of the seam's track. Live on purpose — deferring
+    /// the whole gesture to mouse-up was tried (2026-08-08) and rejected by
+    /// Kennith against the shipped build: out here the desktop's own windows
+    /// ARE the preview, and a band sliding over frozen windows reads as the
+    /// app fighting the drag. The clamp is only the generic one; windows
+    /// that cannot keep up simply stop, and the settle pass reconciles
+    /// whatever the drag couldn't get once the mouse is up.
+    var onDrag: ((DesktopSeam, CGFloat) -> Void)?
 
-    /// Asks how much of a requested shift the split behind the seam can
-    /// actually absorb, so the band stops where the windows will stop.
+    /// How much of a requested shift the split can absorb — the generic
+    /// bound, so the band and the model always agree on where "as far as it
+    /// goes" is.
     var clampShift: ((DesktopSeam, CGFloat) -> CGFloat)?
 
     private var activeSeam: DesktopSeam?
@@ -229,14 +232,17 @@ final class SeamOverlayView: NSView {
             : dragOrigin.y - point.y
 
         let requested = travelled / activeSeam.trackSize
-        activeShift = clampShift?(activeSeam, requested) ?? requested
+        let clamped = clampShift?(activeSeam, requested) ?? requested
+        // Skip the apply when the clamp pinned us to where we already are —
+        // no reason to re-place every window for a drag past the stop.
+        if abs(clamped - activeShift) > 0.0005 {
+            activeShift = clamped
+            onDrag?(activeSeam, clamped)
+        }
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
-        if let activeSeam, abs(activeShift) > 0.0001 {
-            onCommit?(activeSeam, activeShift)
-        }
         activeSeam = nil
         activeShift = 0
         needsDisplay = true
