@@ -1844,13 +1844,23 @@ class WindowManager {
     }
 
     private func constrainFrame(_ frame: CGRect, for window: ExternalWindow) -> CGRect {
-        let minSize = window.minSize
-        let maxSize = window.maxSize
+        func clamp(_ frame: CGRect) -> CGRect {
+            var constrained = frame
+            constrained.size.width = max(window.minSize.width, min(window.maxSize.width, frame.width))
+            constrained.size.height = max(window.minSize.height, min(window.maxSize.height, frame.height))
+            return constrained
+        }
 
-        var constrained = frame
-        constrained.size.width = max(minSize.width, min(maxSize.width, frame.width))
-        constrained.size.height = max(minSize.height, min(maxSize.height, frame.height))
-
+        var constrained = clamp(frame)
+        // The cached limits are only trusted while they don't bind. Some apps
+        // (Webex) report different minimums in different states, and clamping
+        // to a stale large one silently refuses every shrink — so the moment
+        // a clamp would actually change the requested size, pay for one fresh
+        // read and clamp against the truth.
+        if constrained.size != frame.size {
+            window.refreshSizeLimits()
+            constrained = clamp(frame)
+        }
         return constrained
     }
 

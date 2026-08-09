@@ -358,6 +358,17 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
         return resolved
     }
 
+    /// Forget the cached min/max so the next read asks the app again.
+    ///
+    /// The cache assumed a window's limits are fixed for life. Webex's are
+    /// not — it reports different minimum widths in different states, and a
+    /// stale large minimum silently vetoed every attempt to shrink it: drops
+    /// left it "stuck" wide, and seam drags on its column felt dead.
+    func refreshSizeLimits() {
+        cachedMinSize = nil
+        cachedMaxSize = nil
+    }
+
     /// Live minimized state, read from the app every time — the cached
     /// `isMinimized` only refreshes on discovery passes, and the layout needs
     /// the truth at apply time to give a minimized window's space away.
