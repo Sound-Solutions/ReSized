@@ -363,48 +363,12 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
         return resolved
     }
 
-    /// Where this window has actually dug in when asked to shrink. Apps that
-    /// report no AXMinimumSize (Webex) still refuse below some size; the only
-    /// way to know it is to notice.
-    private var observedFloor: CGSize = .zero
-    private var observedFloorAt: Date = .distantPast
-
-    /// An observed floor EXPIRES. A busy app that ignored one write looks
-    /// identical, in a single sample, to a hard minimum — and a wrong floor
-    /// is self-sealing: the seam clamps there, so the smaller ask that would
-    /// disprove it never gets made, and the window "refuses to get smaller,
-    /// period". Long enough to hold through a drag (dragging against a real
-    /// minimum re-confirms it continuously); short enough that the next
-    /// gesture re-probes reality.
-    private static let observedFloorLifetime: TimeInterval = 15
-
-    /// The real smallest size to plan around: the reported minimum, plus the
-    /// observed refusal floor while it's fresh. Costs no AX call.
-    var effectiveMinSize: CGSize {
-        let fresh = Date().timeIntervalSince(observedFloorAt) < Self.observedFloorLifetime
-        return CGSize(
-            width: max(minSize.width, fresh ? observedFloor.width : 0),
-            height: max(minSize.height, fresh ? observedFloor.height : 0)
-        )
-    }
-
-    /// Learn from what a placement actually produced. Landing bigger than
-    /// asked sets (and re-confirms) the floor at where the window dug in;
-    /// ever landing smaller relaxes it immediately.
-    func noteAppliedSize(asked: CGSize, got: CGSize) {
-        if got.width > asked.width + 10 {
-            observedFloor.width = got.width
-            observedFloorAt = Date()
-        } else if got.width < observedFloor.width {
-            observedFloor.width = got.width
-        }
-        if got.height > asked.height + 10 {
-            observedFloor.height = got.height
-            observedFloorAt = Date()
-        } else if got.height < observedFloor.height {
-            observedFloor.height = got.height
-        }
-    }
+    // NOTE: an "observed minimum" learned from refused shrinks was tried here
+    // and reverted. Apps apply AX resizes asynchronously, so a read right
+    // after a write races the app and sees the OLD size — which is
+    // indistinguishable from a refusal, and the phantom floor it learns then
+    // clamps the seam that would have disproven it. Seams clamp on REPORTED
+    // minimums only.
 
     /// Forget the cached min/max so the next read asks the app again.
     ///

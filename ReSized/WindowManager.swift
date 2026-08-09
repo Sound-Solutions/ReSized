@@ -1736,18 +1736,18 @@ class WindowManager {
     /// minimum, or for a split whatever its panes need together. Minimized
     /// windows take no space and impose nothing.
     private func cellMinWidth(_ window: ExternalWindow?, _ container: LayoutContainer?) -> CGFloat {
-        if let window { return window.isMinimized ? 0 : window.effectiveMinSize.width }
+        if let window { return window.isMinimized ? 0 : window.minSize.width }
         guard let container else { return 0 }
         let mins = container.children.filter { !$0.window.isMinimized }
-            .map { $0.window.effectiveMinSize.width }
+            .map { $0.window.minSize.width }
         return container.direction == .horizontal ? mins.reduce(0, +) : (mins.max() ?? 0)
     }
 
     private func cellMinHeight(_ window: ExternalWindow?, _ container: LayoutContainer?) -> CGFloat {
-        if let window { return window.isMinimized ? 0 : window.effectiveMinSize.height }
+        if let window { return window.isMinimized ? 0 : window.minSize.height }
         guard let container else { return 0 }
         let mins = container.children.filter { !$0.window.isMinimized }
-            .map { $0.window.effectiveMinSize.height }
+            .map { $0.window.minSize.height }
         return container.direction == .vertical ? mins.reduce(0, +) : (mins.max() ?? 0)
     }
 
@@ -1764,8 +1764,8 @@ class WindowManager {
         let window = container.children[index].window
         guard !window.isMinimized else { return 0 }
         let points = container.direction == .horizontal
-            ? window.effectiveMinSize.width
-            : window.effectiveMinSize.height
+            ? window.minSize.width
+            : window.minSize.height
         return floorProportion(
             points, ofTrack: splitTrackSize(in: layout, slot: cell, direction: container.direction)
         )
@@ -3507,11 +3507,6 @@ class WindowManager {
                 actualAX = second
             }
         }
-
-        // What the window actually did teaches its real floor — the seam
-        // clamps read effectiveMinSize, so a divider stops where the window
-        // will stop instead of sliding past it.
-        window.noteAppliedSize(asked: targetAX.size, got: actualAX.size)
 
         return convertFrameFromAXCoordinates(actualAX)
     }
