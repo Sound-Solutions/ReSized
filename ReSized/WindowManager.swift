@@ -516,10 +516,12 @@ class WindowManager {
     /// Terminal's character-cell snapping lands within a few points of any ask.
     private static let settleTolerance: CGFloat = 4
     /// How far a track's real sizes may overflow it before the seams get
-    /// walked back. Looser than the refusal slop: a column hanging a few
-    /// points over the Dock margin is invisible, and correcting it would be
-    /// a visible nudge after every drag.
-    private static let settleOverflowTolerance: CGFloat = 10
+    /// walked back. Sized to Webex's post-settle drift, which measured +10
+    /// to +31 all night while genuine refusals measured +58 and +76 — at 10
+    /// this fired a visible walk-back after every tiny shrink, purely on
+    /// wobble. The residual hides over the 76pt Dock strip; real refusals
+    /// clear this bar with room to spare.
+    private static let settleOverflowTolerance: CGFloat = 32
     /// Overflow earns ONE corrective re-apply per user action: the first
     /// correction protects the refusers and reclaims the space, the floors
     /// learned from it keep the next drag honest, and any residue is
@@ -4106,8 +4108,12 @@ class WindowManager {
             var reasked = false
             forEachManagedWindow(in: layout) { window, key in
                 guard let rect = real[key], let intended = layout.intendedFrames[key] else { return }
-                if rect.width > intended.width + Self.settleTolerance
-                    || rect.height > intended.height + Self.settleTolerance {
+                // Only misses a refusal could explain get a re-ask. Webex
+                // drifts ±20-30 after settling, and re-asking into the drift
+                // just shakes the tree for another round of drift — the
+                // system never goes quiet.
+                if rect.width > intended.width + Self.settleFloorLearnTolerance
+                    || rect.height > intended.height + Self.settleFloorLearnTolerance {
                     AccessibilityHelper.logDebug(
                         "settle[\(layout.screen.localizedName)]: re-asking \(window.ownerName) for "
                         + "\(Int(intended.width))x\(Int(intended.height)) (took \(Int(rect.width))x\(Int(rect.height)))"
