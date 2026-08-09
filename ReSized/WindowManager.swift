@@ -424,9 +424,13 @@ class MonitorLayout {
 
     /// The one-shot no-overlap check scheduled after every apply — see
     /// runSettleCheck. The attempt counter bounds its corrective re-applies
-    /// so a window that refuses everything cannot loop it forever.
+    /// so a window that refuses everything cannot loop it forever; the
+    /// snapshot and wait counter are how it tells "refused" from "still
+    /// getting around to it" — it only judges a world that has stopped moving.
     @ObservationIgnored var settleWorkItem: DispatchWorkItem?
     @ObservationIgnored var settleAttempts: Int = 0
+    @ObservationIgnored var settleSnapshot: [UUID: CGRect] = [:]
+    @ObservationIgnored var settleWaits: Int = 0
 
     /// Small margin to account for apps that can't fill exactly (size increments, min sizes)
     static let edgeMargin: CGFloat = 8
@@ -510,7 +514,16 @@ class WindowManager {
     /// Slop before the settle pass calls a size difference a refusal —
     /// Terminal's character-cell snapping lands within a few points of any ask.
     private static let settleTolerance: CGFloat = 4
+    /// How far a track's real sizes may overflow it before the seams get
+    /// walked back. Looser than the refusal slop: a column hanging a few
+    /// points over the Dock margin is invisible, and correcting it would be
+    /// a visible nudge after every drag.
+    private static let settleOverflowTolerance: CGFloat = 10
     private static let maxSettleAttempts = 2
+    /// How many consecutive still-moving reads the settle check will sit
+    /// through before giving up until the next apply. Safari has been seen
+    /// taking seconds to honour a resize; 8 waits is ~3s of patience.
+    private static let maxSettleWaits = 8
     /// True while the settle pass itself is re-applying, so the apply it
     /// triggers doesn't reset the attempt counter that bounds it.
     @ObservationIgnored private var isSettling = false
@@ -3909,6 +3922,16 @@ class WindowManager {
         // A fresh user action gets a fresh correction budget; the settle
         // pass's own re-apply must not refill the budget that bounds it.
         if !isSettling { layout.settleAttempts = 0 }
+        // Any apply invalidates what the last check saw — stability has to be
+        // re-proven from scratch.
+        layout.settleSnapshot = [:]
+        layout.settleWaits = 0
+        scheduleSettleRun(for: layout)
+    }
+
+    /// (Re)arm the check without resetting the stability bookkeeping — used
+    /// by the check itself to look again when the world is still moving.
+    private func scheduleSettleRun(for layout: MonitorLayout) {
         layout.settleWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self, weak layout] in
             guard let self, let layout else { return }
@@ -3937,44 +3960,37 @@ class WindowManager {
         let bounds = layout.containerBounds
         guard bounds.width > 0, bounds.height > 0 else { return }
 
-        // Where every managed window really is, keyed like expectedFrames.
-        // Any unreadable frame aborts the whole pass: an AX timeout is not
-        // evidence of anything, and mass unreadability means the session is
-        // blacked out (see checkForClosedWindows).
-        var real: [UUID: CGRect] = [:]
-        func read(_ window: ExternalWindow, key: UUID) -> Bool {
-            guard let ax = ExternalWindow.getFrame(from: window.axElement) else { return false }
-            real[key] = convertFrameFromAXCoordinates(ax)
-            return true
+        // Where every managed window really is, keyed like expectedFrames. An
+        // unreadable frame is treated the same as a moving one — look again
+        // later; an AX timeout is not evidence of anything.
+        guard let real = settleFrames(of: layout) else {
+            waitForSettle(layout, why: "frame unreadable")
+            return
         }
-        func readPanes(of container: LayoutContainer) -> Bool {
-            for child in container.children where !child.window.isMinimized {
-                guard read(child.window, key: child.id) else { return false }
+
+        // Judge nothing until two consecutive reads agree. A slow app
+        // (Safari can take seconds) is still mid-resize at the first look,
+        // and correcting against its old size chases a moving target — the
+        // post-release jitter was exactly that chase. A world that has
+        // stopped moving tells the truth about who refused what.
+        let stable = layout.settleSnapshot.count == real.count
+            && real.allSatisfy { key, rect in
+                guard let last = layout.settleSnapshot[key] else { return false }
+                return abs(rect.minX - last.minX) <= Self.settleTolerance
+                    && abs(rect.minY - last.minY) <= Self.settleTolerance
+                    && abs(rect.width - last.width) <= Self.settleTolerance
+                    && abs(rect.height - last.height) <= Self.settleTolerance
             }
-            return true
+        layout.settleSnapshot = real
+        guard stable else {
+            waitForSettle(layout, why: "world still moving")
+            return
         }
-        switch layout.layoutMode {
-        case .columns:
-            for column in layout.columns {
-                for cell in column.windows {
-                    if let window = cell.window {
-                        guard window.isMinimized || read(window, key: cell.id) else { return }
-                    } else if let container = cell.nestedContainer {
-                        guard readPanes(of: container) else { return }
-                    }
-                }
-            }
-        case .rows:
-            for row in layout.rows {
-                for cell in row.windows {
-                    if let window = cell.window {
-                        guard window.isMinimized || read(window, key: cell.id) else { return }
-                    } else if let container = cell.nestedContainer {
-                        guard readPanes(of: container) else { return }
-                    }
-                }
-            }
-        }
+
+        // Settled truth is also the honest baseline for judging the next
+        // notification — without this, a window that quietly finished its
+        // resize later reads as a user edit against the stale read-back.
+        for (key, rect) in real { layout.expectedFrames[key] = rect }
 
         // The area a cell's real windows cover, or nil when everything in it
         // is minimized.
@@ -4087,6 +4103,58 @@ class WindowManager {
         isSettling = false
     }
 
+    /// Look again after another settle delay, up to the wait budget. The
+    /// budget only limits watching — a genuinely busy app that never goes
+    /// quiet simply keeps its layout until the next apply.
+    private func waitForSettle(_ layout: MonitorLayout, why: String) {
+        layout.settleWaits += 1
+        guard layout.settleWaits < Self.maxSettleWaits else {
+            AccessibilityHelper.logDebug("settle: gave up waiting (\(why))")
+            return
+        }
+        scheduleSettleRun(for: layout)
+    }
+
+    /// The real frame of every managed, non-minimized window in the layout,
+    /// keyed like expectedFrames — or nil if any of them cannot be read.
+    private func settleFrames(of layout: MonitorLayout) -> [UUID: CGRect]? {
+        var real: [UUID: CGRect] = [:]
+        func read(_ window: ExternalWindow, key: UUID) -> Bool {
+            guard let ax = ExternalWindow.getFrame(from: window.axElement) else { return false }
+            real[key] = convertFrameFromAXCoordinates(ax)
+            return true
+        }
+        func readPanes(of container: LayoutContainer) -> Bool {
+            for child in container.children where !child.window.isMinimized {
+                guard read(child.window, key: child.id) else { return false }
+            }
+            return true
+        }
+        switch layout.layoutMode {
+        case .columns:
+            for column in layout.columns {
+                for cell in column.windows {
+                    if let window = cell.window {
+                        guard window.isMinimized || read(window, key: cell.id) else { return nil }
+                    } else if let container = cell.nestedContainer {
+                        guard readPanes(of: container) else { return nil }
+                    }
+                }
+            }
+        case .rows:
+            for row in layout.rows {
+                for cell in row.windows {
+                    if let window = cell.window {
+                        guard window.isMinimized || read(window, key: cell.id) else { return nil }
+                    } else if let container = cell.nestedContainer {
+                        guard readPanes(of: container) else { return nil }
+                    }
+                }
+            }
+        }
+        return real
+    }
+
     /// Panes within a split share their cell the same way the cells share
     /// the monitor — fit each split's track too.
     private func settleSplitTracks(in layout: MonitorLayout, real: [UUID: CGRect], changed: inout Bool) {
@@ -4160,7 +4228,7 @@ class WindowManager {
     ) -> [CGFloat]? {
         guard track > 0, targets.count > 1,
               achieved.count == targets.count, floors.count == targets.count else { return nil }
-        guard achieved.reduce(0, +) > track + Self.settleTolerance else { return nil }
+        guard achieved.reduce(0, +) > track + Self.settleOverflowTolerance else { return nil }
 
         var sizes = targets
         var hardFloors = floors.map { max($0, Self.minPaneProportion * track) }
@@ -4170,7 +4238,7 @@ class WindowManager {
         }
 
         let deficit = sizes.reduce(0, +) - track
-        guard deficit > Self.settleTolerance else { return nil }
+        guard deficit > Self.settleOverflowTolerance else { return nil }
 
         let slack = sizes.indices.map { max(0, sizes[$0] - hardFloors[$0]) }
         let totalSlack = slack.reduce(0, +)
