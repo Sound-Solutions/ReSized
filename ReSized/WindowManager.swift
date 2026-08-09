@@ -1519,11 +1519,88 @@ class WindowManager {
         return ids
     }
 
+    /// Enforce single ownership: strip a window out of every monitor's layout
+    /// except the one claiming it now — BOTH mode arrays, not just the live
+    /// one. A window forgotten in a layout's inactive mode is not counted as
+    /// placed, gets placed again elsewhere, and the moment that mode comes
+    /// back two layouts own one window: every seam move on one gets
+    /// "corrected" by the other, which reads as the app fighting the hand.
+    private func enforceSingleOwnership(of windowId: UUID, keptBy keptMonitorId: String?) {
+        for (monitorId, layout) in monitorLayouts where monitorId != keptMonitorId {
+            var touched = false
+
+            func strip(_ container: LayoutContainer) -> LayoutContainer? {
+                guard container.children.contains(where: { $0.window.id == windowId }) else {
+                    return container
+                }
+                touched = true
+                var updated = container
+                updated.children.removeAll { $0.window.id == windowId }
+                guard !updated.children.isEmpty else { return nil }
+                updated.normalizeProportions()
+                return updated
+            }
+
+            var columns = layout.columns
+            for columnIndex in columns.indices.reversed() {
+                var cells = columns[columnIndex].windows
+                for cellIndex in cells.indices.reversed() {
+                    if cells[cellIndex].window?.id == windowId {
+                        touched = true
+                        cells.remove(at: cellIndex)
+                    } else if let container = cells[cellIndex].nestedContainer {
+                        if let remaining = strip(container) {
+                            cells[cellIndex].nestedContainer = remaining
+                        } else {
+                            cells.remove(at: cellIndex)
+                        }
+                    }
+                }
+                columns[columnIndex].windows = cells
+                if cells.isEmpty { columns.remove(at: columnIndex) }
+            }
+
+            var rows = layout.rows
+            for rowIndex in rows.indices.reversed() {
+                var cells = rows[rowIndex].windows
+                for cellIndex in cells.indices.reversed() {
+                    if cells[cellIndex].window?.id == windowId {
+                        touched = true
+                        cells.remove(at: cellIndex)
+                    } else if let container = cells[cellIndex].nestedContainer {
+                        if let remaining = strip(container) {
+                            cells[cellIndex].nestedContainer = remaining
+                        } else {
+                            cells.remove(at: cellIndex)
+                        }
+                    }
+                }
+                rows[rowIndex].windows = cells
+                if cells.isEmpty { rows.remove(at: rowIndex) }
+            }
+
+            guard touched else { continue }
+            layout.columns = columns
+            layout.rows = rows
+            normalizeColumnProportions(in: layout)
+            for i in layout.columns.indices { normalizeWindowProportions(inColumn: i, in: layout) }
+            normalizeRowProportions(in: layout)
+            for i in layout.rows.indices { normalizeWindowProportions(inRow: i, in: layout) }
+            AccessibilityHelper.logDebug(
+                "ownership: stripped window \(windowId) from \(layout.screen.localizedName)"
+            )
+            if layout.isActive {
+                applyLayoutAndUpdateExpected(for: layout)
+            }
+        }
+    }
+
     // MARK: - Column Management
 
     /// Add a window to a specific column
     func addWindow(_ window: ExternalWindow, toColumn columnIndex: Int, atIndex: Int = -1) {
         guard columnIndex < columns.count else { return }
+        enforceSingleOwnership(of: window.id, keptBy: selectedMonitor?.id)
 
         // Calculate new equal proportions for all windows in this column
         let currentCount = columns[columnIndex].windows.count
@@ -1656,6 +1733,7 @@ class WindowManager {
     /// Add a window to a specific row
     func addWindow(_ window: ExternalWindow, toRow rowIndex: Int, atIndex: Int = -1) {
         guard rowIndex < rows.count else { return }
+        enforceSingleOwnership(of: window.id, keptBy: selectedMonitor?.id)
 
         // Calculate new equal proportions for all windows in this row
         let currentCount = rows[rowIndex].windows.count
@@ -2847,6 +2925,7 @@ class WindowManager {
     /// Put a window into a brand-new column at `index`, everything sharing
     /// equally — the desktop counterpart of dropping past the layout's edge.
     func insertColumn(with window: ExternalWindow, at index: Int) {
+        enforceSingleOwnership(of: window.id, keptBy: selectedMonitor?.id)
         var newColumns = columns
         let landing = max(0, min(index, newColumns.count))
         newColumns.insert(Column(widthProportion: 0, windows: [ColumnWindow(window: window)]), at: landing)
@@ -2859,6 +2938,7 @@ class WindowManager {
 
     /// Row twin of insertColumn(with:at:).
     func insertRow(with window: ExternalWindow, at index: Int) {
+        enforceSingleOwnership(of: window.id, keptBy: selectedMonitor?.id)
         var newRows = rows
         let landing = max(0, min(index, newRows.count))
         newRows.insert(Row(heightProportion: 0, windows: [RowWindow(window: window)]), at: landing)
@@ -2911,6 +2991,7 @@ class WindowManager {
     /// Add a window to a split at a given position among its panes, giving it
     /// an equal share and shrinking the others to make room.
     private func insertPane(_ window: ExternalWindow, intoSplitAt cell: WindowSlot, at index: Int) {
+        enforceSingleOwnership(of: window.id, keptBy: selectedMonitor?.id)
         guard var container = nestedContainer(
             columnIndex: cell.columnIndex, rowIndex: cell.rowIndex, windowIndex: cell.windowIndex
         ) else {
@@ -4000,7 +4081,7 @@ class WindowManager {
                 if rect.width > intended.width + Self.settleTolerance
                     || rect.height > intended.height + Self.settleTolerance {
                     AccessibilityHelper.logDebug(
-                        "settle: re-asking \(window.ownerName) for "
+                        "settle[\(layout.screen.localizedName)]: re-asking \(window.ownerName) for "
                         + "\(Int(intended.width))x\(Int(intended.height)) (took \(Int(rect.width))x\(Int(rect.height)))"
                     )
                     window.setFrame(intended)
@@ -4093,7 +4174,8 @@ class WindowManager {
                 "\(name) asked \(Int(e.proportion / visSum * track)) got \(Int(e.achieved)) floor \(Int(e.floor))"
             }.joined(separator: ", ")
             AccessibilityHelper.logDebug(
-                "settle: \(label) overflowed — achieved \(Int(achievedSum)) in a \(Int(track)) track: \(detail)"
+                "settle[\(layout.screen.localizedName)]: \(label) overflowed — "
+                + "achieved \(Int(achievedSum)) in a \(Int(track)) track: \(detail)"
             )
             for (k, share) in shares.enumerated() { assign(k, share * visSum) }
             changed = true

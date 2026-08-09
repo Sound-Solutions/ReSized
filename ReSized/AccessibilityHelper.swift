@@ -258,10 +258,25 @@ class ExternalWindow: Identifiable, ObservableObject, Equatable {
 
     // MARK: - Window Manipulation
 
+    /// Rate limit for the write log below — a live seam drag writes every
+    /// window dozens of times a second, and one line per 250ms per window is
+    /// enough to see who is writing what without drowning the log.
+    private var lastWriteLog = Date.distantPast
+
     @discardableResult
     func setFrame(_ newFrame: CGRect) -> Bool {
         // No isValid pre-check: a dead element simply returns .invalidUIElement
         // from the sets below, so probing first only costs an extra round trip.
+
+        #if DEBUG
+        if Date().timeIntervalSince(lastWriteLog) > 0.25 {
+            lastWriteLog = Date()
+            AccessibilityHelper.logDebug(
+                "write: \(ownerName) -> \(Int(newFrame.width))x\(Int(newFrame.height))"
+                + " @(\(Int(newFrame.origin.x)),\(Int(newFrame.origin.y)))"
+            )
+        }
+        #endif
 
         // Convert the frame to AX coordinates
         // NSScreen: origin is bottom-left, Y=0 at bottom, Y increases upward
@@ -613,6 +628,16 @@ class WindowDiscovery {
         let appName = app.localizedName ?? "Unknown"
 
         for windowElement in windowList {
+            // Only real, standard windows. Finder keeps a desktop-spanning
+            // phantom in its AX window list (no title, no window id, one
+            // frame covering every display) — a single invisible frame that
+            // size tangles any scan or measurement that trusts the list.
+            var subroleValue: CFTypeRef?
+            AXUIElementCopyAttributeValue(windowElement, kAXSubroleAttribute as CFString, &subroleValue)
+            guard (subroleValue as? String) == (kAXStandardWindowSubrole as String) else {
+                continue
+            }
+
             // Skip minimized windows
             var minimized: CFTypeRef?
             if AXUIElementCopyAttributeValue(windowElement, kAXMinimizedAttribute as CFString, &minimized) == .success,
