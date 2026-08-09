@@ -431,6 +431,7 @@ class MonitorLayout {
     @ObservationIgnored var settleAttempts: Int = 0
     @ObservationIgnored var settleSnapshot: [UUID: CGRect] = [:]
     @ObservationIgnored var settleWaits: Int = 0
+    @ObservationIgnored var settleReasks: Int = 0
 
     /// Small margin to account for apps that can't fill exactly (size increments, min sizes)
     static let edgeMargin: CGFloat = 8
@@ -4017,7 +4018,10 @@ class WindowManager {
     private func scheduleSettleCheck(for layout: MonitorLayout) {
         // A fresh user action gets a fresh correction budget; the settle
         // pass's own re-apply must not refill the budget that bounds it.
-        if !isSettling { layout.settleAttempts = 0 }
+        if !isSettling {
+            layout.settleAttempts = 0
+            layout.settleReasks = 0
+        }
         // Any apply invalidates what the last check saw — stability has to be
         // re-proven from scratch.
         layout.settleSnapshot = [:]
@@ -4088,9 +4092,38 @@ class WindowManager {
         // resize later reads as a user edit against the stale read-back.
         for (key, rect) in real { layout.expectedFrames[key] = rect }
 
-        // Refusals proven at a settled moment become short-lived seam
-        // floors, so the next drag's band stops where the window will stop
-        // instead of promising a size it won't take and correcting after.
+        // A window still at its old size after the world went quiet may not
+        // be refusing at all — Electron drops resizes on the floor while its
+        // renderer is busy, then takes the same ask happily once idle. Ask
+        // once more from calm before treating anyone as immovable; a floor
+        // learned from a busy-drop clamps a seam that a working window
+        // deserved, which read as "Webex won't let me shrink it".
+        if layout.settleReasks < 1 {
+            var reasked = false
+            forEachManagedWindow(in: layout) { window, key in
+                guard let rect = real[key], let intended = layout.intendedFrames[key] else { return }
+                if rect.width > intended.width + Self.settleTolerance
+                    || rect.height > intended.height + Self.settleTolerance {
+                    AccessibilityHelper.logDebug(
+                        "settle: re-asking \(window.ownerName) for "
+                        + "\(Int(intended.width))x\(Int(intended.height)) (took \(Int(rect.width))x\(Int(rect.height)))"
+                    )
+                    window.setFrame(intended)
+                    reasked = true
+                }
+            }
+            if reasked {
+                layout.settleReasks += 1
+                armEventSuppression(for: layout)
+                scheduleSettleRun(for: layout)
+                return
+            }
+        }
+
+        // What is STILL refused after a calm re-ask is a real limit:
+        // it becomes a short-lived seam floor, so the next drag's band stops
+        // where the window will stop instead of promising a size it won't
+        // take and correcting after.
         learnRefusals(in: layout, real: real)
 
         // Whether a cell has anything on screen to measure.
@@ -4302,45 +4335,43 @@ class WindowManager {
         isSettling = false
     }
 
+    /// Every managed, non-minimized window in the layout with the key its
+    /// frames are recorded under — a cell's own id for a plain window, the
+    /// pane's id for a window inside a split.
+    private func forEachManagedWindow(in layout: MonitorLayout, _ body: (ExternalWindow, UUID) -> Void) {
+        func visit(_ window: ExternalWindow?, _ container: LayoutContainer?, _ id: UUID) {
+            if let window, !window.isMinimized {
+                body(window, id)
+            } else if let container {
+                for child in container.children where !child.window.isMinimized {
+                    body(child.window, child.id)
+                }
+            }
+        }
+        switch layout.layoutMode {
+        case .columns:
+            for column in layout.columns {
+                for cell in column.windows { visit(cell.window, cell.nestedContainer, cell.id) }
+            }
+        case .rows:
+            for row in layout.rows {
+                for cell in row.windows { visit(cell.window, cell.nestedContainer, cell.id) }
+            }
+        }
+    }
+
     /// Compare where every window settled against what it was asked, and
     /// let each one's behavioural floor learn from it. "Asked X, still Y
     /// after everything stopped moving" is the evidence the first
     /// learned-floor attempt never had — it sampled straight after the
     /// write and learned phantom floors from apps that hadn't moved yet.
     private func learnRefusals(in layout: MonitorLayout, real: [UUID: CGRect]) {
-        func judge(_ window: ExternalWindow, key: UUID) {
+        forEachManagedWindow(in: layout) { window, key in
             guard let rect = real[key], let intended = layout.intendedFrames[key] else { return }
             window.reconcileWidthFloor(real: rect.width, asked: intended.width,
                                        tolerance: Self.settleTolerance)
             window.reconcileHeightFloor(real: rect.height, asked: intended.height,
                                         tolerance: Self.settleTolerance)
-        }
-
-        switch layout.layoutMode {
-        case .columns:
-            for column in layout.columns {
-                for cell in column.windows {
-                    if let window = cell.window, !window.isMinimized {
-                        judge(window, key: cell.id)
-                    } else if let container = cell.nestedContainer {
-                        for child in container.children where !child.window.isMinimized {
-                            judge(child.window, key: child.id)
-                        }
-                    }
-                }
-            }
-        case .rows:
-            for row in layout.rows {
-                for cell in row.windows {
-                    if let window = cell.window, !window.isMinimized {
-                        judge(window, key: cell.id)
-                    } else if let container = cell.nestedContainer {
-                        for child in container.children where !child.window.isMinimized {
-                            judge(child.window, key: child.id)
-                        }
-                    }
-                }
-            }
         }
     }
 
